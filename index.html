@@ -12,24 +12,24 @@
   <link rel="stylesheet" href="styles.css" />
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-  <link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:wght@300;400;500&family=DM+Mono:wght@300;400&display=swap" rel="stylesheet" />
+  <link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:ital,wght@0,300;0,400;0,500;1,300;1,400&family=DM+Mono:wght@300;400&display=swap" rel="stylesheet" />
   <title>Al Grano</title>
 </head>
 <body>
 
   <header class="app-header">
     <span class="app-logo">al grano</span>
-    <div style="display:flex;gap:8px">
+    <div class="header-actions">
       <button class="btn-icon" id="btnVoiceSettings" title="Ajustes de voz" aria-label="Ajustes de voz">
-        <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+        <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
           <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/>
           <path d="M19 10v2a7 7 0 0 1-14 0v-2"/>
           <line x1="12" y1="19" x2="12" y2="23"/>
           <line x1="8" y1="23" x2="16" y2="23"/>
         </svg>
       </button>
-      <button class="btn-icon" id="btnPanel" title="Ver eventos" aria-label="Ver eventos">
-        <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+      <button class="btn-icon" id="btnPanel" title="Ver todos los eventos" aria-label="Ver eventos">
+        <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
           <rect x="3" y="4" width="18" height="18" rx="2"/>
           <line x1="3" y1="9" x2="21" y2="9"/>
           <line x1="9" y1="4" x2="9" y2="9"/>
@@ -41,66 +41,80 @@
 
   <main class="stage">
 
-    <div class="status-area">
-      <p class="status-label" id="statusLabel">Mantén pulsado para hablar</p>
-      <p class="transcript" id="transcriptText"></p>
+    <!-- ZONA SUPERIOR: próximos eventos -->
+    <div class="upcoming" id="upcoming">
+      <div class="upcoming-header">
+        <span class="upcoming-label" id="upcomingLabel">próximos</span>
+        <span class="upcoming-dot"></span>
+      </div>
+      <div class="upcoming-list" id="upcomingList"></div>
     </div>
 
-    <div class="mic-wrap">
-      <button class="mic-btn" id="micBtn" aria-label="Activar micrófono">
-        <div class="rings">
-          <div class="ring"></div>
-          <div class="ring"></div>
-          <div class="ring"></div>
-        </div>
-        <div class="mic-core">
-          <svg class="icon-mic" width="34" height="34" viewBox="0 0 24 24" fill="none"
-               stroke="currentColor" stroke-width="1.5" stroke-linecap="round">
-            <rect x="9" y="2" width="6" height="11" rx="3"/>
-            <path d="M5 10a7 7 0 0 0 14 0"/>
-            <line x1="12" y1="19" x2="12" y2="22"/>
-            <line x1="9" y1="22" x2="15" y2="22"/>
-          </svg>
-          <svg class="icon-spin" width="34" height="34" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
-            <circle cx="12" cy="12" r="9" stroke-dasharray="28 56"/>
-          </svg>
-        </div>
-      </button>
-    </div>
-
-    <!-- Fallback texto -->
-    <div class="text-row">
-      <input class="text-input" id="textInput" type="text"
-             placeholder='Ej: mañana médico a las 9'
-             autocomplete="off" autocorrect="off" spellcheck="false" />
-      <button class="btn-send" id="btnSend" aria-label="Enviar">
-        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
-          <line x1="22" y1="2" x2="11" y2="13"/>
-          <polygon points="22 2 15 22 11 13 2 9 22 2"/>
-        </svg>
-      </button>
-    </div>
-
-    <!-- Tarjeta confirmación -->
+    <!-- ZONA CENTRAL: confirmación (solo visible al confirmar) -->
     <div class="confirm-card" id="confirmCard" hidden>
       <div class="confirm-preview" id="confirmPreview"></div>
       <div class="confirm-btns">
         <button class="btn-yes" id="btnYes">✓ Guardar</button>
         <button class="btn-no"  id="btnNo">✗ Cancelar</button>
       </div>
-      <p class="confirm-hint">o di "sí" / "no"</p>
+      <p class="confirm-hint">o mantén pulsado para decir "sí" / "no"</p>
     </div>
+
+    <!-- ZONA INFERIOR: estado + micrófono + texto -->
+    <div class="mic-section">
+
+      <div class="status-area">
+        <p class="status-label" id="statusLabel">Mantén pulsado para hablar</p>
+        <p class="transcript" id="transcriptText"></p>
+      </div>
+
+      <div class="mic-wrap">
+        <button class="mic-btn" id="micBtn" aria-label="Activar micrófono">
+          <div class="rings">
+            <div class="ring"></div>
+            <div class="ring"></div>
+            <div class="ring"></div>
+          </div>
+          <div class="mic-core">
+            <svg class="icon-mic" width="34" height="34" viewBox="0 0 24 24" fill="none"
+                 stroke="currentColor" stroke-width="1.5" stroke-linecap="round">
+              <rect x="9" y="2" width="6" height="11" rx="3"/>
+              <path d="M5 10a7 7 0 0 0 14 0"/>
+              <line x1="12" y1="19" x2="12" y2="22"/>
+              <line x1="9" y1="22" x2="15" y2="22"/>
+            </svg>
+            <svg class="icon-spin" width="34" height="34" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+              <circle cx="12" cy="12" r="9" stroke-dasharray="28 56"/>
+            </svg>
+          </div>
+        </button>
+      </div>
+
+      <!-- Input texto (fallback) -->
+      <div class="text-row">
+        <input class="text-input" id="textInput" type="text"
+               placeholder='o escribe aquí…'
+               autocomplete="off" autocorrect="off" spellcheck="false" />
+        <button class="btn-send" id="btnSend" aria-label="Enviar">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+            <line x1="22" y1="2" x2="11" y2="13"/>
+            <polygon points="22 2 15 22 11 13 2 9 22 2"/>
+          </svg>
+        </button>
+      </div>
+
+    </div><!-- /mic-section -->
 
   </main>
 
-  <!-- Panel de eventos -->
+  <!-- Panel completo -->
   <div class="overlay" id="overlay"></div>
   <section class="panel" id="panel" aria-hidden="true">
     <div class="panel-handle"></div>
     <div class="panel-head">
       <h2>Mis eventos</h2>
       <button class="btn-icon" id="btnClose" aria-label="Cerrar">
-        <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
           <line x1="18" y1="6" x2="6" y2="18"/>
           <line x1="6" y1="6" x2="18" y2="18"/>
         </svg>
@@ -118,7 +132,6 @@
 
   <div class="toasts" id="toasts" aria-live="polite"></div>
 
-
   <!-- Modal ajustes de voz -->
   <div class="overlay" id="overlayVoice"></div>
   <div class="voice-modal" id="voiceModal" aria-hidden="true">
@@ -130,34 +143,20 @@
         </svg>
       </button>
     </div>
-
     <div class="vm-body">
-
-      <!-- Selector de voz -->
       <div class="vm-section">
         <label class="vm-label">Voz</label>
         <select class="vm-select" id="voiceSelect"></select>
         <button class="vm-test" id="btnTestVoice">▶ Probar</button>
       </div>
-
-      <!-- Velocidad -->
       <div class="vm-section">
-        <label class="vm-label">
-          Velocidad
-          <span class="vm-val" id="rateVal"></span>
-        </label>
-        <input class="vm-range" id="rateRange" type="range" min="0.5" max="1.5" step="0.05"/>
+        <label class="vm-label">Velocidad <span class="vm-val" id="rateVal"></span></label>
+        <input class="vm-range" id="rateRange" type="range" min="0.5" max="2.0" step="0.05"/>
       </div>
-
-      <!-- Tono -->
       <div class="vm-section">
-        <label class="vm-label">
-          Tono
-          <span class="vm-val" id="pitchVal"></span>
-        </label>
+        <label class="vm-label">Tono <span class="vm-val" id="pitchVal"></span></label>
         <input class="vm-range" id="pitchRange" type="range" min="0.5" max="1.8" step="0.05"/>
       </div>
-
     </div>
   </div>
 

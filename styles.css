@@ -78,9 +78,22 @@ body {
   display: flex;
   flex-direction: column;
   align-items: center;
-  justify-content: center;
-  gap: 40px;
-  padding: 24px;
+  justify-content: space-between;
+  padding: 16px 24px 0;
+  gap: 0;
+  overflow: hidden;
+}
+
+/* ── Sección micrófono (zona inferior) ── */
+.mic-section {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 20px;
+  flex-shrink: 0;
+  width: 100%;
+  max-width: 360px;
+  padding-bottom: max(20px, env(safe-area-inset-bottom));
 }
 
 /* ── STATUS ─────────────────────────────── */
@@ -177,11 +190,121 @@ body {
 .mic-btn.processing .icon-mic { opacity: 0; transform: scale(.8); }
 .mic-btn.processing .icon-spin { opacity: 1; transform: scale(1); }
 
+
+/* ── PRÓXIMOS EVENTOS (pantalla principal) ─ */
+.upcoming {
+  width: 100%;
+  max-width: 360px;
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 0 4px;
+  min-height: 0;
+  overflow-y: auto;
+  transition: opacity .35s var(--ease);
+  scrollbar-width: none;
+}
+.upcoming::-webkit-scrollbar { display: none; }
+
+.upcoming-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 2px;
+}
+
+.upcoming-label {
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: .22em;
+  text-transform: uppercase;
+  color: var(--faint);
+}
+
+.upcoming-dot {
+  flex: 1;
+  height: 1px;
+  background: var(--border);
+}
+
+.upcoming-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.upcoming-empty {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--faint);
+  letter-spacing: .1em;
+  text-align: center;
+  padding: 12px 0;
+}
+
+.upcoming-item {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 11px 14px;
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  border-left: 2px solid var(--amber-dim);
+  animation: fadein .3s ease both;
+  transition: border-color .25s;
+}
+.upcoming-item:hover { border-color: var(--border-hi); }
+
+.upcoming-time {
+  font-family: var(--mono);
+  font-size: 13px;
+  color: var(--amber-dim);
+  min-width: 42px;
+  flex-shrink: 0;
+  font-weight: 300;
+}
+
+.upcoming-info {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.upcoming-title {
+  font-family: var(--serif);
+  font-size: 16px;
+  font-weight: 400;
+  color: var(--text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.upcoming-date {
+  font-family: var(--mono);
+  font-size: 10px;
+  color: var(--muted);
+  letter-spacing: .08em;
+  flex-shrink: 0;
+}
+
+.upcoming-bell {
+  font-size: 11px;
+  opacity: .5;
+  flex-shrink: 0;
+}
+
+/* ── TEXT ROW — más compacto al fondo ────── */
 /* ── TEXT FALLBACK ──────────────────────── */
 .text-row {
   display: flex; gap: 8px;
-  width: 100%; max-width: 320px;
-  opacity: .45; transition: opacity .3s;
+  width: 100%;
+  opacity: .35; transition: opacity .3s;
+  flex-shrink: 0;
 }
 .text-row:focus-within { opacity: 1; }
 

@@ -122,18 +122,42 @@ const NLP = (() => {
 
   const extractTitle = text => {
     let t = text;
-    [/\bhoy\b/gi,/\bmanana\b/gi,/\bpasado manana\b/gi,
-     /\best[ao]?\s+(manana|tarde|noche|mediod[ií]a)\b/gi,
-     /\bpor la (manana|tarde|noche)\b/gi,/\bde la (manana|tarde|noche)\b/gi,
-     /\ba las? \d{1,2}(?::\d{2})?\b/gi,/\bel (?:dia )?\d{1,2}(?:\s+de \w+)?\b/gi,
-     /\b(domingo|lunes|martes|miercoles|jueves|viernes|sabado)\b/gi,
-     /\b(?:avisame?|recuerdame?|aviso|alarma)\b.*?\b(?:antes|hora|minuto)\b/gi,
-     /\btodos los dias\b|\bcada \w+\b/gi,/\bluego\b|\bmas tarde\b|\bdespues\b/gi,
-     /\ba las (?:una|dos|tres|cuatro|cinco|seis|siete|ocho|nueve|diez|once|doce)[^,.]*/gi,
-     /[¿¡]/g
-    ].forEach(r => { t = t.replace(r,' '); });
-    t = t.replace(/\s+/g,' ').trim().replace(/^(?:y|de|el|la|un|una|con|para|que)\s+/i,'');
-    return (t.charAt(0).toUpperCase()+t.slice(1)) || 'Evento';
+
+    // PASADA 1: bloques temporales, fechas, horas (orden importa)
+    [
+      /\bpasado ma\u00f1ana\b/gi, /\bpasado manana\b/gi,
+      /\bpor la (ma\u00f1ana|manana|tarde|noche|madrugada)\b/gi,
+      /\bde la (ma\u00f1ana|manana|tarde|noche)\b/gi,
+      /\besta (ma\u00f1ana|manana|tarde|noche|mediod\u00eda|mediodia)\b/gi,
+      /\bcada\s+\w+\b/gi,
+      /\btodos los d[\u00edi]as\b/gi,
+      /\ba las? \d{1,2}(?::\d{2})?\b/gi,
+      /\ba las (?:una|dos|tres|cuatro|cinco|seis|siete|ocho|nueve|diez|once|doce)[^,.]*/gi,
+      /\bma\u00f1ana\b/gi, /\bmanana\b/gi, /\bhoy\b/gi,
+      /\b(?:este\s+)?(?:domingo|lunes|martes|mi\u00e9rcoles|miercoles|jueves|viernes|s\u00e1bado|sabado)\b/gi,
+      /\bel (?:dia )?\d{1,2}(?:\s+de \w+)?\b/gi,
+      /\b(?:ma\u00f1ana|manana|tarde|noche|mediod\u00eda|mediodia)\b/gi,
+      /\bluego\b|\bm\u00e1s tarde\b|\bmas tarde\b|\bdespu\u00e9s\b|\bdespues\b/gi,
+      /[\u00bf\u00a1]/g,
+    ].forEach(r => { t = t.replace(r, ' '); });
+
+    t = t.replace(/\s+/g, ' ').trim();
+
+    // PASADA 2: recordatorios expuestos tras limpiar horas
+    [
+      /\savisa\w*[^.;]*/gi,
+      /\srecuerda\w*[^.;]*/gi,
+      /\bcon aviso\b[^.;]*/gi,
+      /\balarma\b[^.;]*/gi,
+    ].forEach(r => { t = t.replace(r, ' '); });
+
+    // PASADA 3: palabras hu\u00e9rfanas al inicio/final
+    t = t.replace(/\s+/g, ' ').trim()
+         .replace(/^(?:y|e|o|de|el|la|los|las|un|una|con|para|que|a)\s+/i, '')
+         .replace(/\s+(?:y|e|o|de|el|la|un|una)$/i, '')
+         .trim();
+
+    return (t.charAt(0).toUpperCase() + t.slice(1)) || 'Evento';
   };
 
   const parse = text => {
@@ -184,7 +208,7 @@ const NLP = (() => {
 const Voice = (() => {
   let voices  = [];
   let selName = localStorage.getItem('ag-voice') || '';
-  let cfg     = JSON.parse(localStorage.getItem('ag-vcfg') || '{"rate":0.88,"pitch":1.05}');
+  let cfg     = JSON.parse(localStorage.getItem('ag-vcfg') || '{"rate":1.25,"pitch":1.00}');
 
   const loadVoices = () => { voices = speechSynthesis.getVoices(); return voices; };
   if (window.speechSynthesis) {
@@ -420,6 +444,8 @@ const UI = (() => {
         label.textContent='Mantén pulsado para hablar';
         $('transcriptText').textContent='';
         $('confirmCard').hidden=true;
+        $('upcoming').style.opacity='1';
+        $('upcoming').style.pointerEvents='auto';
         break;
       case 'listening':
         label.textContent='Suelta cuando termines…';
@@ -435,6 +461,8 @@ const UI = (() => {
         label.textContent='Mantén pulsado para responder';
         label.classList.add('listening');
         $('confirmCard').hidden=false;
+        $('upcoming').style.opacity='0';
+        $('upcoming').style.pointerEvents='none';
         break;
     }
   };
@@ -578,6 +606,77 @@ const VoiceSettings = (() => {
   return { init };
 })();
 
+
+/* ============================================================
+   PRÓXIMOS EVENTOS — resumen en pantalla principal
+   Muestra los 3 próximos eventos con fecha/hora
+   ============================================================ */
+const Upcoming = (() => {
+  const $ = id => document.getElementById(id);
+
+  const render = async () => {
+    const all  = await DB.getAll();
+    const now  = new Date();
+    const hoy  = new Date(); hoy.setHours(0,0,0,0);
+    const todayS = hoy.toISOString().split('T')[0];
+
+    // Filtrar eventos futuros con fecha y hora, ordenados cronológicamente
+    const future = all
+      .filter(e => {
+        if (e.status === 'pending') return false;
+        if (e.date < todayS) return false;
+        // Si es hoy, solo los que aún no han pasado
+        if (e.date === todayS && e.time) {
+          const [h,m] = e.time.split(':').map(Number);
+          const evTime = new Date(); evTime.setHours(h,m,0,0);
+          return evTime > now;
+        }
+        return true;
+      })
+      .sort((a,b) => (a.date+(a.time||'99:99')).localeCompare(b.date+(b.time||'99:99')))
+      .slice(0, 3);
+
+    const container = $('upcoming');
+    const list      = $('upcomingList');
+    const label     = $('upcomingLabel');
+
+    if (!future.length) {
+      container.classList.add('empty');
+      list.innerHTML = '<p class="upcoming-empty">Sin eventos próximos</p>';
+      return;
+    }
+
+    container.classList.remove('empty');
+
+    // Etiqueta dinámica
+    const firstDate = future[0].date;
+    if (firstDate === todayS) label.textContent = 'hoy';
+    else label.textContent = 'próximos';
+
+    list.innerHTML = '';
+    future.forEach((ev, i) => {
+      const isToday    = ev.date === todayS;
+      const isTomorrow = ev.date === new Date(hoy.getTime()+86400000).toISOString().split('T')[0];
+      const dateTag    = isToday ? 'hoy' : isTomorrow ? 'mañana' : NLP.humanDate(ev.date);
+
+      const item = document.createElement('div');
+      item.className = 'upcoming-item';
+      item.style.animationDelay = `${i * 60}ms`;
+      item.innerHTML = `
+        <div class="upcoming-time">${ev.time || '—'}</div>
+        <div class="upcoming-info">
+          <span class="upcoming-title">${ev.title}</span>
+          ${!isToday ? `<span class="upcoming-date">${dateTag}</span>` : ''}
+        </div>
+        ${ev.reminders.length ? '<div class="upcoming-bell">🔔</div>' : ''}
+      `;
+      list.appendChild(item);
+    });
+  };
+
+  return { render };
+})();
+
 /* ============================================================
    APP — orquestador push-to-talk
    ============================================================ */
@@ -664,6 +763,7 @@ const App = (() => {
       await DB.add(pending);
       Notif.sch(pending);
       UI.toast(`✓ ${pending.title} guardado`,'ok');
+      Upcoming.render();
       Voice.speak(`Guardado. ${pending.title}.`);
       pending = null;
       setMode('idle');
@@ -694,6 +794,7 @@ const App = (() => {
     await DB.open();
     Panel.init();
     VoiceSettings.init();
+    Upcoming.render();
     Notif.req();
 
     const btn = document.getElementById('micBtn');
