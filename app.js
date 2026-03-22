@@ -425,104 +425,123 @@ const Voice = (() => {
 
 /* ══════════════════════════════════════════════════════════
    RECONOCIMIENTO DE VOZ — Push-to-talk
-   · continuous:true  → graba mientras el botón está pulsado
-   · Al soltar → rec.stop() → onresult dispara → procesa
+   Patrón correcto probado en Chrome desktop + Android:
+   · continuous:true + interimResults:true → acumular texto
+   · onresult  → guardar último transcript (interim o final)
+   · onend     → se dispara tras stop(); procesar lo acumulado
+   NO esperar isFinal — eso es lo que fallaba antes
 ══════════════════════════════════════════════════════════ */
 const SR = (() => {
   const SRClass = window.SpeechRecognition || window.webkitSpeechRecognition;
   if (!SRClass) return null;
 
-  let rec       = null;
-  let active    = false;
-  let finalSent = false;
-  let onFinalCb = null;
-  let onErrCb   = null;
+  let rec            = null;
+  let _onFinal       = null;
+  let _onErr         = null;
+  let _lastTranscript = '';   // acumulamos aquí todo lo que llegue
+  let _active        = false;
+  let _stopping      = false; // estamos en proceso de stop() voluntario
 
-  /* Crea e inicia una nueva instancia */
-  const _create = () => {
-    if (rec) { try { rec.abort(); } catch(_) {} }
-    rec       = new SRClass();
+  const _cleanup = () => {
+    _active   = false;
+    _stopping = false;
+  };
+
+  /* ── Iniciar grabación (push) ── */
+  const start = (onFinal, onErr) => {
+    // Abortar instancia anterior limpiamente
+    if (rec) { try { rec.abort(); } catch(_) {} rec = null; }
+
+    _onFinal        = onFinal;
+    _onErr          = onErr;
+    _lastTranscript = '';
+    _active         = false;
+    _stopping       = false;
+
+    rec = new SRClass();
     rec.lang            = 'es-ES';
-    rec.interimResults  = true;   // queremos interim para mostrar texto en tiempo real
+    rec.continuous      = true;   // no para solo — nosotros llamamos stop()
+    rec.interimResults  = true;   // recibir resultados intermedios para feedback visual
     rec.maxAlternatives = 1;
-    rec.continuous      = true;   // no para solo por silencio — para cuando llamemos stop()
-    active    = false;
-    finalSent = false;
 
     rec.onstart = () => {
-      active    = true;
-      finalSent = false;
+      _active = true;
+      _lastTranscript = '';
       console.log('[SR] grabando…');
     };
 
     rec.onresult = e => {
-      // Mostrar interim en tiempo real
-      let interim = '', final = '';
-      for (let i = e.resultIndex; i < e.results.length; i++) {
-        if (e.results[i].isFinal) final   += e.results[i][0].transcript;
-        else                       interim += e.results[i][0].transcript;
+      // Acumular TODO el transcript (interim + final)
+      // Esto es lo que tendremos disponible cuando onend se dispare
+      let full = '';
+      for (let i = 0; i < e.results.length; i++) {
+        full += e.results[i][0].transcript;
       }
-      // Actualizar transcripción visual
-      const display = final || interim;
-      if (display) {
-        const el = document.getElementById('transcriptText');
-        if (el) el.textContent = display;
-      }
-      // Si hay resultado final lo procesamos
-      if (final && !finalSent) {
-        finalSent = true;
-        console.log('[SR] resultado final:', final);
-        onFinalCb && onFinalCb(final);
-      }
+      _lastTranscript = full.trim();
+
+      // Mostrar en pantalla en tiempo real
+      const el = document.getElementById('transcriptText');
+      if (el && _lastTranscript) el.textContent = _lastTranscript;
     };
 
     rec.onend = () => {
-      console.log('[SR] onend · finalSent=', finalSent);
-      active = false;
-      // Si paró sin resultado (ej: usuario no habló nada)
-      if (!finalSent) onErrCb && onErrCb('no-speech');
+      console.log('[SR] onend · transcript="' + _lastTranscript + '" stopping=' + _stopping);
+      _cleanup();
+
+      if (_stopping) {
+        // Stop voluntario (usuario soltó el botón)
+        if (_lastTranscript) {
+          _onFinal && _onFinal(_lastTranscript);
+        } else {
+          // Soltó sin hablar nada
+          _onErr && _onErr('no-speech');
+        }
+      }
+      // Si no es stopping → fue abort() o error → no hacer nada
     };
 
     rec.onerror = e => {
       console.warn('[SR] onerror:', e.error);
-      if (e.error === 'aborted') { active = false; return; }
-      active = false;
-      const silent = ['no-speech', 'audio-capture'];
-      onErrCb && onErrCb(silent.includes(e.error) ? 'silent' : e.error);
+      _cleanup();
+      if (e.error === 'aborted') return; // abort() voluntario, ignorar
+      const silentErrors = ['no-speech', 'audio-capture'];
+      _onErr && _onErr(silentErrors.includes(e.error) ? 'no-speech' : e.error);
     };
-  };
 
-  /* Iniciar grabación (push) */
-  const start = (onFinal, onErr) => {
-    onFinalCb = onFinal;
-    onErrCb   = onErr;
-    _create();
-    // Pequeño delay para que el navegador procese el evento táctil antes
+    // Delay mínimo para que el navegador procese el evento táctil
     setTimeout(() => {
-      try { rec.start(); }
-      catch(e) {
-        console.warn('[SR] start() error:', e.name);
+      if (!rec) return;
+      try {
+        rec.start();
+      } catch(e) {
+        console.warn('[SR] start() excepción:', e.name);
         if (e.name === 'InvalidStateError') {
-          setTimeout(() => { try { rec.start(); } catch(_) {} }, 250);
+          setTimeout(() => { try { rec && rec.start(); } catch(_) {} }, 300);
         }
       }
     }, 50);
   };
 
-  /* Parar grabación (release) — dispara onresult con isFinal */
-  const stop  = () => {
-    if (rec && active) { try { rec.stop(); } catch(e) {} }
-    // active se pone false en onend
+  /* ── Parar grabación (release) → dispara onend → procesa transcript ── */
+  const stop = () => {
+    if (rec && _active) {
+      _stopping = true;
+      console.log('[SR] stop() llamado, transcript hasta ahora:', _lastTranscript);
+      try { rec.stop(); } catch(e) { console.warn('[SR] stop() err:', e); }
+    } else {
+      // Si no estaba activo todavía (stop muy rápido), notificar no-speech
+      _onErr && _onErr('no-speech');
+    }
   };
 
-  /* Abortar sin procesar */
+  /* ── Abortar sin procesar (cancelar) ── */
   const abort = () => {
-    if (rec) { try { rec.abort(); } catch(e) {} }
-    active    = false;
-    finalSent = true; // evitar que onend llame onErr
+    _stopping = false; // marcar como no-voluntario para que onend no procese
+    if (rec) { try { rec.abort(); } catch(_) {} rec = null; }
+    _cleanup();
   };
 
-  const isOn = () => active;
+  const isOn = () => _active;
 
   return { start, stop, abort, isOn };
 })();
@@ -870,11 +889,11 @@ const App = (() => {
     pressing = false;
     document.getElementById('micBtn').classList.remove('pressed');
 
-    if (!SR || !SR.isOn()) return;
+    if (!SR) return;
 
     // Pasar a "procesando" visualmente
     setMode('processing');
-    // Parar la grabación → dispara onresult → onFinal se llama
+    // stop() → onend se dispara → onFinal se llama con el transcript acumulado
     SR.stop();
   };
 
