@@ -286,24 +286,141 @@ const NLP = (() => {
 
 /* ══════════════════════════════════════════════════════════
    SÍNTESIS DE VOZ
+   · Selección inteligente de voz española
+   · Parámetros ajustables en tiempo real
+   · Preferencia persistida en localStorage
 ══════════════════════════════════════════════════════════ */
 const Voice = (() => {
+
+  // Parámetros por defecto — ajustados para sonar natural
+  const defaults = { rate: 0.88, pitch: 1.05, volume: 1.0 };
+
+  // Cargar configuración guardada
+  let cfg = defaults;
+  try {
+    const saved = localStorage.getItem('algrano-voice');
+    if (saved) cfg = { ...defaults, ...JSON.parse(saved) };
+  } catch(_) {}
+
+  let _selectedVoice = null;   // voz elegida por el usuario
+  let _voices        = [];
+
+  /* Cargar voces del sistema */
+  const loadVoices = () => {
+    _voices = window.speechSynthesis?.getVoices() || [];
+    return _voices;
+  };
+
+  /* Ranking automático de voces españolas — prioriza las más naturales */
+  const rankVoice = v => {
+    const n = v.name.toLowerCase();
+    const l = v.lang.toLowerCase();
+    if (!l.startsWith('es')) return -1;
+    let score = 0;
+    // Voces neural/premium conocidas (las mejores)
+    if (n.includes('neural') || n.includes('natural'))  score += 100;
+    if (n.includes('google'))                           score += 80;
+    if (n.includes('premium') || n.includes('enhanced'))score += 70;
+    // Voces de sistema buenas por nombre
+    if (n.includes('monica'))   score += 60;   // macOS
+    if (n.includes('paulina'))  score += 60;   // macOS
+    if (n.includes('jorge'))    score += 55;   // macOS
+    if (n.includes('marisol'))  score += 55;   // macOS
+    if (n.includes('lucia'))    score += 50;
+    if (n.includes('diego'))    score += 50;
+    if (n.includes('carlos'))   score += 45;
+    if (n.includes('sabina'))   score += 45;
+    // Español de España > latinoamericano para este contexto
+    if (l === 'es-es')          score += 10;
+    // Voces locales son más rápidas y offline
+    if (v.localService)         score += 5;
+    return score;
+  };
+
+  /* Elegir la mejor voz disponible automáticamente */
+  const bestVoice = () => {
+    const vv = loadVoices();
+    if (!vv.length) return null;
+    // Si el usuario eligió una, usarla
+    if (_selectedVoice) {
+      const found = vv.find(v => v.name === _selectedVoice);
+      if (found) return found;
+    }
+    // Ranking automático
+    const spanish = vv.filter(v => v.lang.toLowerCase().startsWith('es'));
+    if (!spanish.length) return vv[0]; // fallback sin voz es
+    return spanish.sort((a,b) => rankVoice(b) - rankVoice(a))[0];
+  };
+
+  /* Hablar */
   const speak = (text, cb) => {
     if (!window.speechSynthesis) { cb && cb(); return; }
     window.speechSynthesis.cancel();
-    const u   = new SpeechSynthesisUtterance(text);
-    u.lang    = 'es-ES';
-    u.rate    = 0.92;
-    u.volume  = 1.0;
-    const vv  = window.speechSynthesis.getVoices();
-    const v   = vv.find(x => x.lang.startsWith('es') && x.name.includes('Monica'))
-             || vv.find(x => x.lang.startsWith('es'));
+
+    const u     = new SpeechSynthesisUtterance(text);
+    u.lang      = 'es-ES';
+    u.rate      = cfg.rate;
+    u.pitch     = cfg.pitch;
+    u.volume    = cfg.volume;
+
+    const v = bestVoice();
     if (v) u.voice = v;
-    u.onend = u.onerror = () => { cb && cb(); };
+
+    console.log('[Voice] usando:', v?.name, `rate=${u.rate} pitch=${u.pitch}`);
+
+    // Workaround: Chrome a veces se congela en utterances largas
+    let resumed = false;
+    const keepAlive = setInterval(() => {
+      if (window.speechSynthesis.paused && !resumed) {
+        window.speechSynthesis.resume();
+        resumed = true;
+      }
+    }, 5000);
+
+    u.onend = () => { clearInterval(keepAlive); cb && cb(); };
+    u.onerror = e => {
+      clearInterval(keepAlive);
+      console.warn('[Voice] error:', e.error);
+      cb && cb();
+    };
+
     window.speechSynthesis.speak(u);
   };
+
   const cancel = () => { window.speechSynthesis?.cancel(); };
-  return { speak, cancel };
+
+  /* Listar voces españolas disponibles */
+  const listSpanish = () => {
+    return loadVoices()
+      .filter(v => v.lang.toLowerCase().startsWith('es'))
+      .sort((a,b) => rankVoice(b) - rankVoice(a));
+  };
+
+  /* Seleccionar voz por nombre */
+  const selectVoice = name => {
+    _selectedVoice = name;
+    try { localStorage.setItem('algrano-voice', JSON.stringify({ ...cfg, voice: name })); } catch(_) {}
+  };
+
+  /* Actualizar parámetros */
+  const setParams = ({ rate, pitch, volume } = {}) => {
+    if (rate   !== undefined) cfg.rate   = rate;
+    if (pitch  !== undefined) cfg.pitch  = pitch;
+    if (volume !== undefined) cfg.volume = volume;
+    try { localStorage.setItem('algrano-voice', JSON.stringify(cfg)); } catch(_) {}
+  };
+
+  const getParams  = () => ({ ...cfg });
+  const getVoices  = () => _voices;
+  const getBest    = () => bestVoice()?.name || 'ninguna';
+
+  // Precargar voces en cuanto estén disponibles
+  if (window.speechSynthesis) {
+    loadVoices();
+    window.speechSynthesis.onvoiceschanged = loadVoices;
+  }
+
+  return { speak, cancel, listSpanish, selectVoice, setParams, getParams, getBest, loadVoices };
 })();
 
 /* ══════════════════════════════════════════════════════════
@@ -600,6 +717,86 @@ const Panel = (() => {
   return { init, render };
 })();
 
+
+/* ══════════════════════════════════════════════════════════
+   AJUSTES DE VOZ — Modal
+══════════════════════════════════════════════════════════ */
+const VoiceSettings = (() => {
+  const $ = id => document.getElementById(id);
+
+  const open = () => {
+    populate();
+    $('voiceModal').classList.add('open');
+    $('overlayVoice').classList.add('on');
+  };
+
+  const close = () => {
+    $('voiceModal').classList.remove('open');
+    $('overlayVoice').classList.remove('on');
+  };
+
+  const populate = () => {
+    const voices  = Voice.listSpanish();
+    const select  = $('voiceSelect');
+    const best    = Voice.getBest();
+    const params  = Voice.getParams();
+
+    // Rellenar selector de voces
+    select.innerHTML = '';
+
+    if (!voices.length) {
+      select.innerHTML = '<option value="">No hay voces españolas instaladas</option>';
+    } else {
+      voices.forEach(v => {
+        const opt = document.createElement('option');
+        opt.value = v.name;
+        // Indicar si es la mejor automática
+        const tag = v.name === best ? ' ★' : '';
+        opt.textContent = `${v.name}${tag} (${v.lang})`;
+        if (v.name === best) opt.selected = true;
+        select.appendChild(opt);
+      });
+    }
+
+    // Sliders
+    const rateR  = $('rateRange');
+    const pitchR = $('pitchRange');
+    rateR.value  = params.rate;
+    pitchR.value = params.pitch;
+    $('rateVal').textContent  = params.rate.toFixed(2);
+    $('pitchVal').textContent = params.pitch.toFixed(2);
+
+    rateR.oninput = () => {
+      const v = parseFloat(rateR.value);
+      $('rateVal').textContent = v.toFixed(2);
+      Voice.setParams({ rate: v });
+    };
+    pitchR.oninput = () => {
+      const v = parseFloat(pitchR.value);
+      $('pitchVal').textContent = v.toFixed(2);
+      Voice.setParams({ pitch: v });
+    };
+
+    // Cambio de voz
+    select.onchange = () => {
+      Voice.selectVoice(select.value);
+    };
+  };
+
+  const init = () => {
+    $('btnVoiceSettings').addEventListener('click', open);
+    $('btnCloseVoice').addEventListener('click', close);
+    $('overlayVoice').addEventListener('click', close);
+    $('btnTestVoice').addEventListener('click', () => {
+      Voice.cancel();
+      Voice.selectVoice($('voiceSelect').value);
+      Voice.speak('Hola, esto es Al Grano. ¿Cómo suena esta voz?');
+    });
+  };
+
+  return { init };
+})();
+
 /* ══════════════════════════════════════════════════════════
    APP — Orquestador (Push-to-talk)
 
@@ -761,6 +958,7 @@ const App = (() => {
   const init = async () => {
     await DB.open();
     Panel.init();
+    VoiceSettings.init();
     Notif.request();
 
     const btn = document.getElementById('micBtn');
@@ -796,12 +994,6 @@ const App = (() => {
     document.getElementById('textInput').addEventListener('keydown', e => {
       if (e.key === 'Enter') { e.preventDefault(); submitText(); }
     });
-
-    // Cargar voces en background
-    if (window.speechSynthesis) {
-      window.speechSynthesis.getVoices();
-      window.speechSynthesis.onvoiceschanged = () => {};
-    }
 
     if (!SR) {
       document.getElementById('statusLabel').textContent = 'Escribe tu evento abajo';
