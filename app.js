@@ -242,134 +242,140 @@ const Voice = (() => {
 
 /* ============================================================
    RECONOCIMIENTO DE VOZ — Push-to-talk
-   SOLUCIÓN CLAVE: getUserMedia() primero para obtener permiso
-   explícito, luego SpeechRecognition. Sin esto, todos los
-   navegadores devuelven not-allowed (Chrome, Safari, Brave).
+   MediaRecorder graba mientras el botón está pulsado.
+   Al soltar, el audio se envía a Groq Whisper para transcribir.
+   Funciona en Chrome, Safari, Firefox, Chrome Android, sin excepciones.
    ============================================================ */
 const SR = (() => {
-  const Cls = window.SpeechRecognition || window.webkitSpeechRecognition;
-  if (!Cls) { console.warn('[SR] API no disponible'); return null; }
+  const GROQ_KEY    = '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';
+  const GROQ_URL    = 'https://api.groq.com/openai/v1/audio/transcriptions';
+  const GROQ_MODEL  = 'whisper-large-v3-turbo';  // más rápido y gratuito
 
-  let rec        = null;
-  let _stream    = null;   // stream getUserMedia — se cierra en onend/abort
-  let transcript = '';
+  let mediaRec   = null;
+  let chunks     = [];
   let active     = false;
-  let stopping   = false;
   let cbFinal    = null;
   let cbErr      = null;
+  let stream     = null;
 
-  const _closeStream = () => {
-    if (_stream) { _stream.getTracks().forEach(t => t.stop()); _stream = null; }
-  };
-
-  /* ── Crear e iniciar la instancia de reconocimiento ── */
-  const _startRec = () => {
-    if (rec) { try { rec.abort(); } catch(_){} }
-
-    rec = new Cls();
-    rec.lang            = 'es-ES';
-    rec.continuous      = true;
-    rec.interimResults  = true;
-    rec.maxAlternatives = 1;
-    transcript = '';
-    stopping   = false;
-
-    rec.onstart = () => {
-      active = true;
-      console.log('[SR] grabando…');
-    };
-
-    rec.onresult = e => {
-      let t = '';
-      for (let i = 0; i < e.results.length; i++) t += e.results[i][0].transcript;
-      transcript = t.trim();
-      const el = document.getElementById('transcriptText');
-      if (el) el.textContent = transcript;
-    };
-
-    rec.onend = () => {
-      console.log('[SR] onend — stopping:', stopping, '— transcript:', transcript);
-      active = false;
-      _closeStream();   // ahora sí, SR terminó, liberamos el stream
-      if (stopping) {
-        if (transcript) cbFinal?.(transcript);
-        else            cbErr?.('no-speech');
-      }
-    };
-
-    rec.onerror = e => {
-      console.warn('[SR] onerror:', e.error);
-      active = false;
-      if (e.error === 'aborted') return;
-      cbErr?.(e.error);
-    };
-
-    try {
-      rec.start();
-      console.log('[SR] start() ok');
-    } catch(e) {
-      console.error('[SR] start() excepción:', e.name, e.message);
-      cbErr?.(e.name);
-    }
-  };
-
-  /* ── Detectar si estamos en Android Chrome ── */
-  const isAndroidChrome = () => {
-    const ua = navigator.userAgent;
-    return /Android/.test(ua) && /Chrome/.test(ua) && !/EdgA|OPR/.test(ua);
-  };
-
-  /* ── start():
-     - Android Chrome → SpeechRecognition directamente (getUserMedia lo bloquea)
-     - Resto (Safari Mac, Chrome Mac…) → getUserMedia primero para disparar el popup
-  ── */
+  /* ── Iniciar grabación (push) ── */
   const start = (onFinal, onErr) => {
     cbFinal = onFinal;
     cbErr   = onErr;
+    chunks  = [];
     active  = false;
 
-    if (isAndroidChrome()) {
-      // Android Chrome: SpeechRecognition gestiona su propio permiso vía Android OS.
-      // Llamar getUserMedia ANTES bloquea el audio — no lo hacemos.
-      console.log('[SR] Android Chrome detectado → SR directo sin getUserMedia');
-      _startRec();
-    } else {
-      // Desktop Chrome, Safari, Edge: getUserMedia dispara el popup de permiso
-      // y luego SR arranca con el stream activo.
-      navigator.mediaDevices.getUserMedia({ audio: true })
-        .then(stream => {
-          _stream = stream;
-          console.log('[SR] permiso getUserMedia concedido → iniciando SR');
-          _startRec();
-        })
-        .catch(err => {
-          console.error('[SR] getUserMedia rechazado:', err.name, err.message);
-          if (err.name === 'NotAllowedError' || err.name === 'PermissionDeniedError') {
-            cbErr?.('not-allowed');
-          } else if (err.name === 'NotFoundError') {
-            cbErr?.('no-mic');
-          } else {
-            cbErr?.(err.name);
-          }
-        });
-    }
+    navigator.mediaDevices.getUserMedia({ audio: true })
+      .then(s => {
+        stream = s;
+        active = true;
+
+        // Elegir el formato más compatible
+        const mimeType = [
+          'audio/webm;codecs=opus',
+          'audio/webm',
+          'audio/ogg;codecs=opus',
+          'audio/mp4',
+        ].find(t => MediaRecorder.isTypeSupported(t)) || '';
+
+        mediaRec = new MediaRecorder(stream, mimeType ? { mimeType } : {});
+
+        mediaRec.ondataavailable = e => {
+          if (e.data && e.data.size > 0) chunks.push(e.data);
+        };
+
+        mediaRec.onstop = async () => {
+          // Liberar micrófono
+          stream.getTracks().forEach(t => t.stop());
+          stream = null;
+
+          if (chunks.length === 0) { cbErr?.('no-speech'); return; }
+
+          const blob = new Blob(chunks, { type: mediaRec.mimeType || 'audio/webm' });
+          console.log('[SR] grabación terminada, tamaño:', blob.size, 'bytes, tipo:', blob.type);
+
+          if (blob.size < 1000) { cbErr?.('no-speech'); return; }
+
+          await transcribe(blob);
+        };
+
+        mediaRec.start(100);  // chunk cada 100ms
+        console.log('[SR] grabando con MediaRecorder…');
+      })
+      .catch(err => {
+        console.error('[SR] getUserMedia error:', err.name);
+        active = false;
+        if (err.name === 'NotAllowedError' || err.name === 'PermissionDeniedError') {
+          cbErr?.('not-allowed');
+        } else {
+          cbErr?.(err.name);
+        }
+      });
   };
 
+  /* ── Parar grabación (release) → enviar a Whisper ── */
   const stop = () => {
-    console.log('[SR] stop() — active:', active);
-    if (active) {
-      stopping = true;
-      try { rec.stop(); } catch(e) { console.warn('[SR] stop() err:', e); }
+    if (mediaRec && active && mediaRec.state === 'recording') {
+      active = false;
+      mediaRec.stop();  // dispara onstop → transcribe()
     } else {
+      active = false;
       cbErr?.('no-speech');
     }
   };
 
+  /* ── Abortar sin procesar ── */
   const abort = () => {
-    stopping = false;
-    if (rec) { try { rec.abort(); } catch(_){} rec = null; }
-    _closeStream();
     active = false;
+    if (mediaRec && mediaRec.state === 'recording') {
+      mediaRec.ondataavailable = null;
+      mediaRec.onstop = null;
+      mediaRec.stop();
+    }
+    if (stream) { stream.getTracks().forEach(t => t.stop()); stream = null; }
+    chunks = [];
+  };
+
+  /* ── Transcribir con Groq Whisper ── */
+  const transcribe = async blob => {
+    try {
+      console.log('[SR] enviando a Groq Whisper…');
+      const statusEl = document.getElementById('statusLabel');
+      if (statusEl) statusEl.textContent = 'Transcribiendo…';
+
+      const form = new FormData();
+      // Whisper necesita extensión en el nombre del fichero
+      const ext  = blob.type.includes('ogg') ? 'ogg'
+                 : blob.type.includes('mp4') ? 'mp4' : 'webm';
+      form.append('file',     new File([blob], `audio.${ext}`, { type: blob.type }));
+      form.append('model',    GROQ_MODEL);
+      form.append('language', 'es');
+      form.append('response_format', 'json');
+
+      const res = await fetch(GROQ_URL, {
+        method:  'POST',
+        headers: { 'Authorization': `Bearer ${GROQ_KEY}` },
+        body:    form,
+      });
+
+      if (!res.ok) {
+        const errText = await res.text();
+        console.error('[SR] Groq error:', res.status, errText);
+        cbErr?.('groq-error');
+        return;
+      }
+
+      const data = await res.json();
+      const text = data?.text?.trim();
+      console.log('[SR] Whisper resultado:', text);
+
+      if (text) cbFinal?.(text);
+      else      cbErr?.('no-speech');
+
+    } catch(e) {
+      console.error('[SR] fetch error:', e);
+      cbErr?.('network');
+    }
   };
 
   const isOn = () => active;
@@ -607,7 +613,8 @@ const App = (() => {
         pressing = false;
         console.log('[App] SR err:', err);
         if      (err === 'not-allowed') UI.toast('Permiso de micrófono denegado. Ve a ajustes del navegador.','err',7000);
-        else if (err === 'network')     UI.toast('Sin conexión. Chrome necesita internet para el reconocimiento.','err',6000);
+        else if (err === 'network')     UI.toast('Sin conexión. Necesitas internet para el reconocimiento de voz.','err',6000);
+        else if (err === 'groq-error')  UI.toast('Error en el servidor de voz. Inténtalo de nuevo.','err',4000);
         else if (err === 'no-speech')   { /* silencioso — no habló nada */ }
         else                            UI.toast(`Error: ${err}`,'err',4000);
         setMode(phase==='confirm' ? 'confirming' : 'idle');
