@@ -71,6 +71,19 @@
       </button>
     </div>
 
+    <!-- Fallback: entrada de texto -->
+    <div class="text-fallback" id="textFallback">
+      <input type="text" class="text-input" id="textInput"
+             placeholder='Ej: "mañana médico a las 9"'
+             autocomplete="off" autocorrect="off" spellcheck="false" />
+      <button class="btn-text-send" id="btnTextSend" aria-label="Enviar">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+          <line x1="22" y1="2" x2="11" y2="13"/>
+          <polygon points="22 2 15 22 11 13 2 9 22 2"/>
+        </svg>
+      </button>
+    </div>
+
     <!-- Tarjeta de confirmación -->
     <div class="confirm-card" id="confirmCard" hidden>
       <div class="confirm-event-preview" id="confirmPreview"></div>

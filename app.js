@@ -415,56 +415,106 @@ const Voice = (() => {
 
 /* ══════════════════════════════════════════════════════════════
    RECONOCIMIENTO DE VOZ
+   — Robusto para Android Chrome móvil —
 ══════════════════════════════════════════════════════════════ */
 const SpeechRec = (() => {
   const SRClass = window.SpeechRecognition || window.webkitSpeechRecognition;
   if (!SRClass) return null;
 
-  let rec      = null;
-  let onResult = null;
-  let onEnd    = null;
-  let active   = false;
+  let rec         = null;
+  let onResult    = null;
+  let onEnd       = null;
+  let active      = false;
+  let gotResult   = false;   // ¿recibimos algo antes de onend?
+  let finalSent   = false;   // ¿ya procesamos un resultado final?
 
   const create = () => {
+    // Siempre crear instancia nueva (Chrome móvil no reutiliza bien)
     rec = new SRClass();
     rec.lang            = CONFIG.voice.lang;
-    rec.interimResults  = CONFIG.voice.interimResults;
-    rec.maxAlternatives = CONFIG.voice.maxAlternatives;
+    // interimResults=false en móvil evita el disparo prematuro de onend
+    rec.interimResults  = false;
+    rec.maxAlternatives = 1;
     rec.continuous      = false;
 
+    rec.onstart = () => {
+      active    = true;
+      gotResult = false;
+      finalSent = false;
+      console.log('[SR] Iniciado');
+    };
+
     rec.onresult = (e) => {
+      gotResult = true;
       let interim = '', final = '';
       for (let i = e.resultIndex; i < e.results.length; i++) {
         if (e.results[i].isFinal) final   += e.results[i][0].transcript;
         else                       interim += e.results[i][0].transcript;
       }
-      onResult && onResult({ interim, final });
+      // Mostrar interim aunque interimResults=false (por si acaso)
+      if (interim && !final) onResult && onResult({ interim, final: '' });
+      if (final && !finalSent) {
+        finalSent = true;
+        onResult && onResult({ interim: '', final });
+      }
     };
 
-    rec.onend  = () => { active = false; onEnd && onEnd(); };
+    rec.onend = () => {
+      console.log('[SR] onend, gotResult=', gotResult);
+      active = false;
+      // Solo llamar onEnd si NO hubo resultado (evita doble proceso)
+      if (!finalSent) onEnd && onEnd(gotResult ? null : 'no-speech');
+    };
+
     rec.onerror = (e) => {
       console.warn('[SR] Error:', e.error);
+      // 'aborted' ocurre cuando llamamos stop() manualmente — no es error real
+      if (e.error === 'aborted') { active = false; return; }
       active = false;
-      onEnd && onEnd(e.error);
+      // 'no-speech' y 'audio-capture' son errores silenciosos (el usuario no habló)
+      const silentErrors = ['no-speech', 'audio-capture'];
+      onEnd && onEnd(silentErrors.includes(e.error) ? 'silent' : e.error);
     };
   };
 
   const start = (resultCb, endCb) => {
+    // Si ya hay una instancia activa, pararla antes
+    if (rec && active) {
+      try { rec.abort(); } catch(e) {}
+      active = false;
+    }
     onResult = resultCb;
     onEnd    = endCb;
     create();
-    try { rec.start(); active = true; }
-    catch(e) { console.warn('[SR] No se pudo iniciar:', e); }
+    // Pequeño delay en móvil: el navegador necesita un tick tras eventos táctiles
+    setTimeout(() => {
+      try {
+        rec.start();
+      } catch(e) {
+        console.warn('[SR] start() falló:', e.message);
+        // InvalidStateError = ya está corriendo, intentar de nuevo
+        if (e.name === 'InvalidStateError') {
+          setTimeout(() => { try { rec.start(); } catch(e2) {} }, 300);
+        }
+      }
+    }, 100);
   };
 
   const stop = () => {
-    if (rec && active) { try { rec.stop(); } catch(e) {} }
+    if (rec && active) {
+      try { rec.stop(); } catch(e) {}
+    }
+    active = false;
+  };
+
+  const abort = () => {
+    if (rec) { try { rec.abort(); } catch(e) {} }
     active = false;
   };
 
   const isActive = () => active;
 
-  return { start, stop, isActive };
+  return { start, stop, abort, isActive };
 })();
 
 /* ══════════════════════════════════════════════════════════════
@@ -742,12 +792,21 @@ const App = (() => {
       return;
     }
 
+    // Si el sintetizador está hablando, pararlo primero
     Voice.cancel();
-    const { mode, confirmReady } = UI.getState();
 
-    // Si estamos en modo confirmar, escuchar respuesta
+    const { mode } = UI.getState();
+
+    // Si estamos esperando confirmación, escuchar respuesta
     if (mode === 'confirming') {
       listenForConfirmation();
+      return;
+    }
+
+    // Si ya está escuchando, parar (toggle)
+    if (SpeechRec.isActive()) {
+      SpeechRec.abort();
+      UI.setMode('idle');
       return;
     }
 
@@ -755,6 +814,7 @@ const App = (() => {
 
     SpeechRec.start(
       ({ interim, final }) => {
+        // Mostrar texto en tiempo real
         if (interim) UI.transcriptEl.textContent = interim;
         if (final) {
           UI.transcriptEl.textContent = final;
@@ -763,10 +823,19 @@ const App = (() => {
         }
       },
       (err) => {
-        if (err === 'no-speech') {
+        console.log('[App] onEnd err=', err);
+        if (err === 'silent' || err === 'no-speech' || !err) {
+          // El usuario no habló — volver a idle silenciosamente
           UI.setMode('idle');
-        } else if (err) {
-          UI.toast('No te escuché. Inténtalo de nuevo.', 'error');
+        } else if (err === 'not-allowed') {
+          UI.toast('Permiso de micrófono denegado. Actívalo en ajustes del navegador.', 'error', 5000);
+          UI.setMode('idle');
+        } else if (err === 'network') {
+          UI.toast('Sin conexión. El reconocimiento de voz requiere internet en Chrome.', 'error', 5000);
+          UI.setMode('idle');
+        } else {
+          // Otros errores: reintentar automáticamente una vez
+          console.warn('[App] Error SR:', err, '— reintentando…');
           UI.setMode('idle');
         }
       }
@@ -804,32 +873,40 @@ const App = (() => {
   // ── Escuchar confirmación ────────────────────
   const listenForConfirmation = () => {
     if (!SpeechRec) return;
+    // Parar cualquier instancia activa antes de empezar nueva
+    SpeechRec.abort();
     UI.setMode('confirming');
 
-    SpeechRec.start(
-      ({ final }) => {
-        if (!final) return;
-        SpeechRec.stop();
-        const norm = final.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+    // Pequeño delay para que abort() finalice antes de arrancar de nuevo
+    setTimeout(() => {
+      SpeechRec.start(
+        ({ final }) => {
+          if (!final) return;
+          SpeechRec.stop();
+          const norm = final.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+          console.log('[App] Confirmación escuchada:', norm);
 
-        if (CONFIG.confirmWords.yes.some(w => norm.includes(w))) {
-          saveEvent();
-        } else if (CONFIG.confirmWords.no.some(w => norm.includes(w))) {
-          cancelEvent();
-        } else {
-          // Puede ser una modificación ("cámbialo a las 10")
-          UI.toast('No entendí. Di "sí" para guardar o "no" para cancelar.', 'info');
-          listenForConfirmation();
+          if (CONFIG.confirmWords.yes.some(w => norm.includes(w))) {
+            saveEvent();
+          } else if (CONFIG.confirmWords.no.some(w => norm.includes(w))) {
+            cancelEvent();
+          } else {
+            UI.toast('Di "sí" para guardar o "no" para cancelar', 'info');
+            // No re-escuchar automáticamente — el usuario puede pulsar el botón
+          }
+        },
+        (err) => {
+          // Timeout silencioso en confirmación — no hacer nada, el usuario puede pulsar botón
+          console.log('[App] Confirmación sin respuesta, err=', err);
         }
-      },
-      () => { /* timeout silencioso */ }
-    );
+      );
+    }, 150);
   };
 
   // ── Guardar evento ───────────────────────────
   const saveEvent = async () => {
     Voice.cancel();
-    SpeechRec && SpeechRec.stop();
+    SpeechRec && SpeechRec.abort();
     const state = UI.getState();
     const ev    = state.pendingEvent;
     if (!ev) { UI.setMode('idle'); return; }
@@ -854,7 +931,7 @@ const App = (() => {
   // ── Cancelar ─────────────────────────────────
   const cancelEvent = () => {
     Voice.cancel();
-    SpeechRec && SpeechRec.stop();
+    SpeechRec && SpeechRec.abort();
     UI.setPendingEvent(null);
     chainMode = false;
     UI.setMode('idle');
@@ -876,6 +953,23 @@ const App = (() => {
 
     // Botón micrófono
     document.getElementById('micBtn').addEventListener('click', startListening);
+
+    // Fallback: entrada de texto
+    const textInput   = document.getElementById('textInput');
+    const btnTextSend = document.getElementById('btnTextSend');
+
+    const submitText = () => {
+      const val = textInput.value.trim();
+      if (!val) return;
+      textInput.value = '';
+      UI.transcriptEl.textContent = val;
+      processInput(val);
+    };
+
+    btnTextSend.addEventListener('click', submitText);
+    textInput.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') { e.preventDefault(); submitText(); }
+    });
 
     // Atajo de teclado: Espacio
     document.addEventListener('keydown', (e) => {
