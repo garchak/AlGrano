@@ -1,0 +1,38 @@
+{
+  "name": "Al Grano",
+  "short_name": "Al Grano",
+  "description": "Crea y gestiona eventos por voz. Sin fricción, sin formularios.",
+  "start_url": "/",
+  "display": "standalone",
+  "orientation": "portrait-primary",
+  "background_color": "#0d0d0d",
+  "theme_color": "#0d0d0d",
+  "lang": "es",
+  "dir": "ltr",
+  "categories": ["productivity", "utilities"],
+  "icons": [
+    {
+      "src": "icons/icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any maskable"
+    },
+    {
+      "src": "icons/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any maskable"
+    }
+  ],
+  "screenshots": [],
+  "shortcuts": [
+    {
+      "name": "Nuevo evento por voz",
+      "short_name": "Nuevo evento",
+      "description": "Abre Al Grano para crear un evento con voz",
+      "url": "/",
+      "icons": [{ "src": "icons/icon-192.png", "sizes": "192x192" }]
+    }
+  ],
+  "prefer_related_applications": false
+}
