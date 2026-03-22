@@ -1,717 +1,469 @@
-/* ══════════════════════════════════════════════════════════
-   AL GRANO — app.js
-   Voz → NLP → confirmación → IndexedDB
-   Optimizado para Chrome desktop + Chrome Android (HTTPS)
-══════════════════════════════════════════════════════════ */
+/* ============================================================
+   AL GRANO — app.js  (reescrito limpio)
+   Push-to-talk · NLP español · IndexedDB · Voces del sistema
+   ============================================================ */
 'use strict';
 
-/* ── Service Worker ────────────────────────────────────── */
+/* ── Service Worker ─────────────────────────────────────── */
 if ('serviceWorker' in navigator) {
-  window.addEventListener('load', () => {
-    navigator.serviceWorker.register('service-worker.js')
-      .then(r  => console.log('[SW] Registrado:', r.scope))
-      .catch(e => console.warn('[SW] Error:', e));
-  });
+  navigator.serviceWorker.register('./service-worker.js')
+    .then(r => console.log('[SW] ok:', r.scope))
+    .catch(e => console.warn('[SW] error:', e));
 }
 
-/* ══════════════════════════════════════════════════════════
-   CONFIGURACIÓN
-══════════════════════════════════════════════════════════ */
-const BLOCKS = {
-  mañana:   '09:00',
-  manana:   '09:00',
-  tarde:    '16:00',
-  noche:    '21:00',
-  mediodía: '13:00',
-  mediodia: '13:00',
+/* ============================================================
+   CONFIG
+   ============================================================ */
+const CONFIRM_YES = ['sí','si','vale','correcto','ok','afirmativo',
+                     'guardar','adelante','perfecto','claro','venga','bueno'];
+const CONFIRM_NO  = ['no','cancelar','borrar','descartar','olvida'];
+
+const TIME_BLOCKS = {
+  manana: '09:00', mañana: '09:00',
+  tarde:  '16:00',
+  noche:  '21:00',
+  mediodia:'13:00', mediodía:'13:00',
 };
 
-const CONFIRM_YES = ['sí','si','vale','correcto','ok','afirmativo','guardar','adelante','perfecto','claro','venga','bueno'];
-const CONFIRM_NO  = ['no','cancelar','cancel','borrar','descartar','olvida','olvídalo'];
-
-/* ══════════════════════════════════════════════════════════
-   BASE DE DATOS — IndexedDB
-══════════════════════════════════════════════════════════ */
+/* ============================================================
+   IndexedDB
+   ============================================================ */
 const DB = (() => {
-  let _db = null;
-
-  const open = () => new Promise((res, rej) => {
-    if (_db) return res(_db);
-    const r = indexedDB.open('algrano-v1', 1);
+  let db = null;
+  const open = () => new Promise((ok, fail) => {
+    if (db) return ok(db);
+    const r = indexedDB.open('algrano', 2);
     r.onupgradeneeded = e => {
-      const db = e.target.result;
-      if (!db.objectStoreNames.contains('eventos')) {
-        db.createObjectStore('eventos', { keyPath: 'id' });
-      }
+      if (!e.target.result.objectStoreNames.contains('eventos'))
+        e.target.result.createObjectStore('eventos', { keyPath: 'id' });
     };
-    r.onsuccess = e => { _db = e.target.result; res(_db); };
-    r.onerror   = e => rej(e.target.error);
+    r.onsuccess = e => { db = e.target.result; ok(db); };
+    r.onerror   = e => fail(e.target.error);
   });
-
-  const add = async ev => {
-    const db = await open();
-    return new Promise((res, rej) => {
-      const tx = db.transaction('eventos', 'readwrite');
-      tx.objectStore('eventos').add(ev).onsuccess = () => res();
-      tx.onerror = () => rej(tx.error);
-    });
-  };
-
-  const getAll = async () => {
-    const db = await open();
-    return new Promise((res, rej) => {
-      const tx = db.transaction('eventos', 'readonly');
-      const r  = tx.objectStore('eventos').getAll();
-      r.onsuccess = () => res(r.result);
-      r.onerror   = () => rej(r.error);
-    });
-  };
-
-  const remove = async id => {
-    const db = await open();
-    return new Promise((res, rej) => {
-      const tx = db.transaction('eventos', 'readwrite');
-      tx.objectStore('eventos').delete(id).onsuccess = () => res();
-      tx.onerror = () => rej(tx.error);
-    });
-  };
-
-  return { open, add, getAll, remove };
+  const add    = async ev  => { const d = await open(); return new Promise((ok,fail) => { const t = d.transaction('eventos','readwrite'); t.objectStore('eventos').add(ev).onsuccess = ok; t.onerror = fail; }); };
+  const getAll = async ()  => { const d = await open(); return new Promise((ok,fail) => { const r = d.transaction('eventos','readonly').objectStore('eventos').getAll(); r.onsuccess = () => ok(r.result); r.onerror = fail; }); };
+  const del    = async id  => { const d = await open(); return new Promise((ok,fail) => { const t = d.transaction('eventos','readwrite'); t.objectStore('eventos').delete(id).onsuccess = ok; t.onerror = fail; }); };
+  return { open, add, getAll, del };
 })();
 
-/* ══════════════════════════════════════════════════════════
-   NLP — Parser de lenguaje natural en español
-══════════════════════════════════════════════════════════ */
+/* ============================================================
+   NLP — parser español basado en reglas
+   ============================================================ */
 const NLP = (() => {
+  const n = t => t.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/[¿¡]/g,'').trim();
 
-  const norm = t =>
-    t.toLowerCase()
-     .normalize('NFD').replace(/[\u0300-\u036f]/g, '')
-     .replace(/[¿¡]/g, '')
-     .trim();
-
-  /* ── Fecha ── */
-  const parseDate = n => {
+  const parseDate = s => {
     const hoy = new Date(); hoy.setHours(0,0,0,0);
-    if (/\bhoy\b/.test(n))           return new Date(hoy);
-    if (/\bpasado manana\b/.test(n)) return addDays(hoy, 2);
-    if (/\bmanana\b/.test(n))        return addDays(hoy, 1);
-
-    const dias = ['domingo','lunes','martes','miercoles','jueves','viernes','sabado'];
-    const mDia = new RegExp(`\\b(${dias.join('|')})\\b`).exec(n);
-    if (mDia) {
-      const target = dias.indexOf(mDia[1]);
-      const hd     = new Date().getDay();
-      let diff     = target - hd;
-      if (diff <= 0) diff += 7;
-      return addDays(hoy, diff);
-    }
-
-    const meses  = ['enero','febrero','marzo','abril','mayo','junio',
-                    'julio','agosto','septiembre','octubre','noviembre','diciembre'];
-    const mFecha = /\bel (?:dia )?(\d{1,2})(?:\s+de\s+(\w+))?\b/.exec(n);
-    if (mFecha) {
+    if (/\bhoy\b/.test(s))           return new Date(hoy);
+    if (/\bpasado manana\b/.test(s)) return ad(hoy,2);
+    if (/\bmanana\b/.test(s))        return ad(hoy,1);
+    const dd = ['domingo','lunes','martes','miercoles','jueves','viernes','sabado'];
+    const m  = new RegExp(`\\b(${dd.join('|')})\\b`).exec(s);
+    if (m) { let d = dd.indexOf(m[1]) - new Date().getDay(); if(d<=0)d+=7; return ad(hoy,d); }
+    const mf = /\bel (?:dia )?(\d{1,2})(?:\s+de\s+(\w+))?\b/.exec(s);
+    if (mf) {
+      const meses=['enero','febrero','marzo','abril','mayo','junio','julio','agosto','septiembre','octubre','noviembre','diciembre'];
       let mes = hoy.getMonth();
-      if (mFecha[2]) { const i = meses.indexOf(mFecha[2]); if (i >= 0) mes = i; }
-      const d = new Date(hoy.getFullYear(), mes, parseInt(mFecha[1]));
-      if (d < hoy) d.setFullYear(d.getFullYear() + 1);
-      return d;
+      if (mf[2]) { const i=meses.indexOf(mf[2]); if(i>=0)mes=i; }
+      const r = new Date(hoy.getFullYear(), mes, parseInt(mf[1]));
+      if (r < hoy) r.setFullYear(r.getFullYear()+1);
+      return r;
     }
     return null;
   };
 
-  /* ── Hora ── */
-  const parseTime = n => {
-    // Bloques con preposición
-    for (const [b, t] of Object.entries(BLOCKS)) {
-      const bn = norm(b);
-      if (n.includes(`por la ${bn}`) || n.includes(`esta ${bn}`) || n.includes(`de ${bn}`))
-        return { time: t, block: b };
+  const parseTime = s => {
+    for (const [b,t] of Object.entries(TIME_BLOCKS)) {
+      if (s.includes(`por la ${b}`) || s.includes(`esta ${b}`) || s.includes(`de ${b}`))
+        return { time:t, block:b };
     }
-
-    // Números escritos "a las nueve"
-    const nums = {
-      una:'01',dos:'02',tres:'03',cuatro:'04',cinco:'05',seis:'06',
-      siete:'07',ocho:'08',nueve:'09',diez:'10',once:'11',doce:'12',
-      trece:'13',catorce:'14',quince:'15',dieciseis:'16',diecisiete:'17',
-      dieciocho:'18',diecinueve:'19',veinte:'20',veintiuna:'21',
-      veintidos:'22',veintitres:'23'
-    };
-    const minEscritos = { 'y cuarto':'15', 'y media':'30', 'menos cuarto':'45' };
-
-    for (const [esc, num] of Object.entries(nums)) {
-      if (new RegExp(`\\ba las ${esc}\\b`).test(n)) {
-        let m = '00';
-        for (const [me, mv] of Object.entries(minEscritos)) {
-          if (n.includes(`${esc} ${me}`)) { m = mv; break; }
-        }
-        let h = parseInt(num);
-        if (h < 8 && !n.includes('manana')) h += 12;
-        return { time: `${String(h).padStart(2,'0')}:${m}`, block: null };
+    const nums={una:'01',dos:'02',tres:'03',cuatro:'04',cinco:'05',seis:'06',siete:'07',ocho:'08',nueve:'09',diez:'10',once:'11',doce:'12',trece:'13',catorce:'14',quince:'15',dieciseis:'16',diecisiete:'17',dieciocho:'18',diecinueve:'19',veinte:'20',veintiuna:'21',veintidos:'22',veintitres:'23'};
+    const mins={'y cuarto':'15','y media':'30','menos cuarto':'45'};
+    for (const [esc,num] of Object.entries(nums)) {
+      if (new RegExp(`\\ba las ${esc}\\b`).test(s)) {
+        let m='00';
+        for (const [me,mv] of Object.entries(mins)) { if(s.includes(`${esc} ${me}`)){m=mv;break;} }
+        let h=parseInt(num); if(h<8&&!s.includes('manana'))h+=12;
+        return { time:`${String(h).padStart(2,'0')}:${m}`, block:null };
       }
     }
-
-    // Dígitos "a las 9" "9:30" "las 21:00"
-    const mH = /\b(?:a las?|las?)?\s*(\d{1,2})(?::(\d{2}))?\s*(?:h|hs|horas?)?\b/.exec(n);
-    if (mH) {
-      let h = parseInt(mH[1]);
-      const m = mH[2] ? parseInt(mH[2]) : 0;
-      if (h >= 1 && h < 8 && !n.includes('manana')) h += 12;
-      if (h < 24 && m < 60) return { time: `${String(h).padStart(2,'0')}:${String(m).padStart(2,'0')}`, block: null };
+    const mh = /\b(?:a las?|las?)?\s*(\d{1,2})(?::(\d{2}))?\b/.exec(s);
+    if (mh) {
+      let h=parseInt(mh[1]), m=mh[2]?parseInt(mh[2]):0;
+      if(h>=1&&h<8)h+=12;
+      if(h<24&&m<60) return { time:`${String(h).padStart(2,'0')}:${String(m).padStart(2,'0')}`, block:null };
     }
-
-    // Bloques solos
-    for (const [b, t] of Object.entries(BLOCKS)) {
-      if (n.includes(norm(b))) return { time: t, block: b };
-    }
+    for (const [b,t] of Object.entries(TIME_BLOCKS)) { if(s.includes(b)) return {time:t,block:b}; }
     return null;
   };
 
-  /* ── Recordatorios ── */
-  const parseReminders = n => {
-    const rs = [];
-    const rMin = /(?:avisame?|recuerdame?|aviso|alarma|recordatorio)\s+(?:una?\s+)?(\d+|media)\s+minuto/g;
+  const parseReminders = s => {
+    const rs=[];
     let m;
-    while ((m = rMin.exec(n)) !== null) rs.push(m[1] === 'media' ? 30 : parseInt(m[1]) || 0);
-    const rHr = /(?:avisame?|recuerdame?|aviso|alarma|recordatorio)\s+(una?|\d+)\s+hora/g;
-    while ((m = rHr.exec(n)) !== null) rs.push(m[1] === 'una' ? 60 : (parseInt(m[1]) || 1) * 60);
-    if (/\b15 minutos antes\b/.test(n) && !rs.includes(15)) rs.push(15);
-    if (/\bmedia hora antes\b/.test(n)  && !rs.includes(30)) rs.push(30);
-    if (/\buna hora antes\b/.test(n)    && !rs.includes(60)) rs.push(60);
-    if (/\bdos horas antes\b/.test(n)   && !rs.includes(120)) rs.push(120);
+    const r1=/(?:avisame?|recuerdame?|aviso|alarma)\s+(?:una?\s+)?(\d+|media)\s+minuto/g;
+    while((m=r1.exec(s))!==null) rs.push(m[1]==='media'?30:parseInt(m[1])||0);
+    const r2=/(?:avisame?|recuerdame?|aviso|alarma)\s+(una?|\d+)\s+hora/g;
+    while((m=r2.exec(s))!==null) rs.push(m[1]==='una'?60:(parseInt(m[1])||1)*60);
+    if(/\b15 minutos antes\b/.test(s)&&!rs.includes(15)) rs.push(15);
+    if(/\bmedia hora antes\b/.test(s)&&!rs.includes(30))  rs.push(30);
+    if(/\buna hora antes\b/.test(s)&&!rs.includes(60))    rs.push(60);
     return [...new Set(rs)];
   };
 
-  /* ── Repetición ── */
-  const parseRepeat = n => {
-    if (/todos los dias|cada dia/.test(n))      return 'Todos los días';
-    if (/todas las semanas|cada semana/.test(n)) return 'Cada semana';
-    const diasEs = ['domingo','lunes','martes','miercoles','jueves','viernes','sabado'];
-    const diasSp = ['domingos','lunes','martes','miércoles','jueves','viernes','sábados'];
-    const m = new RegExp(`cada (${diasEs.join('|')})`).exec(n);
-    if (m) return `Cada ${diasSp[diasEs.indexOf(m[1])]}`;
+  const parseRepeat = s => {
+    if(/todos los dias|cada dia/.test(s))      return 'Todos los días';
+    if(/todas las semanas|cada semana/.test(s)) return 'Cada semana';
+    const dd=['domingo','lunes','martes','miercoles','jueves','viernes','sabado'];
+    const ds=['domingos','lunes','martes','miércoles','jueves','viernes','sábados'];
+    const m=new RegExp(`cada (${dd.join('|')})`).exec(s);
+    if(m) return `Cada ${ds[dd.indexOf(m[1])]}`;
     return null;
   };
 
-  /* ── Título ── */
   const extractTitle = text => {
     let t = text;
-    const rm = [
-      /\bhoy\b/gi, /\bmanana\b/gi, /\bpasado manana\b/gi,
-      /\best[ao]?\s+(manana|tarde|noche|mediod[ií]a)\b/gi,
-      /\bpor la (manana|tarde|noche)\b/gi,
-      /\bde la (manana|tarde|noche)\b/gi,
-      /\ba las? \d{1,2}(?::\d{2})?\b/gi,
-      /\bel (dia )?\d{1,2}(\s+de \w+)?\b/gi,
-      /\b(domingo|lunes|martes|miercoles|jueves|viernes|sabado)\b/gi,
-      /\b(?:avisame?|recuerdame?|aviso|alarma|recordatorio)\b.*?\b(antes|hora|minuto)\b/gi,
-      /\btodos los dias\b|\bcada \w+\b/gi,
-      /\bluego\b|\bmas tarde\b|\bdespues\b/gi,
-      /\ba las (una|dos|tres|cuatro|cinco|seis|siete|ocho|nueve|diez|once|doce)[^,.]*/gi,
-      /[¿¡]/g
-    ];
-    rm.forEach(r => { t = t.replace(r, ' '); });
-    t = t.replace(/\s+/g, ' ').trim()
-         .replace(/^(y|de|el|la|un|una|con|para|que)\s+/i, '');
-    return (t.charAt(0).toUpperCase() + t.slice(1)) || 'Evento';
+    [/\bhoy\b/gi,/\bmanana\b/gi,/\bpasado manana\b/gi,
+     /\best[ao]?\s+(manana|tarde|noche|mediod[ií]a)\b/gi,
+     /\bpor la (manana|tarde|noche)\b/gi,/\bde la (manana|tarde|noche)\b/gi,
+     /\ba las? \d{1,2}(?::\d{2})?\b/gi,/\bel (?:dia )?\d{1,2}(?:\s+de \w+)?\b/gi,
+     /\b(domingo|lunes|martes|miercoles|jueves|viernes|sabado)\b/gi,
+     /\b(?:avisame?|recuerdame?|aviso|alarma)\b.*?\b(?:antes|hora|minuto)\b/gi,
+     /\btodos los dias\b|\bcada \w+\b/gi,/\bluego\b|\bmas tarde\b|\bdespues\b/gi,
+     /\ba las (?:una|dos|tres|cuatro|cinco|seis|siete|ocho|nueve|diez|once|doce)[^,.]*/gi,
+     /[¿¡]/g
+    ].forEach(r => { t = t.replace(r,' '); });
+    t = t.replace(/\s+/g,' ').trim().replace(/^(?:y|de|el|la|un|una|con|para|que)\s+/i,'');
+    return (t.charAt(0).toUpperCase()+t.slice(1)) || 'Evento';
   };
 
-  /* ── Parse principal ── */
   const parse = text => {
-    const n         = norm(text);
-    const fecha     = parseDate(n);
-    const hora      = parseTime(n);
-    const reminders = parseReminders(n);
-    const repeat    = parseRepeat(n);
-    const hoy       = new Date(); hoy.setHours(0,0,0,0);
-    const date      = fecha || hoy;
-
+    const s    = n(text);
+    const fecha = parseDate(s);
+    const hora  = parseTime(s);
+    const hoy   = new Date(); hoy.setHours(0,0,0,0);
     return {
       id:        `ev_${Date.now()}_${Math.random().toString(36).slice(2,6)}`,
       title:     extractTitle(text),
-      date:      date.toISOString().split('T')[0],
+      date:      (fecha||hoy).toISOString().split('T')[0],
       time:      hora?.time  ?? null,
       block:     hora?.block ?? null,
-      reminders,
-      repeat,
-      status:    (!fecha && !hora) ? 'pending' : 'scheduled',
+      reminders: parseReminders(s),
+      repeat:    parseRepeat(s),
+      status:    (!fecha&&!hora) ? 'pending' : 'scheduled',
       createdAt: Date.now(),
-      raw:       text
+      raw:       text,
     };
   };
 
-  /* ── Merge (frases encadenadas) ── */
-  const merge = (base, text) => {
-    const n     = norm(text);
-    const hora  = parseTime(n);
-    const fecha = parseDate(n);
-    const rems  = parseReminders(n);
-    const rep   = parseRepeat(n);
-    if (hora)        { base.time = hora.time; base.block = hora.block; }
-    if (fecha)       { base.date = fecha.toISOString().split('T')[0]; }
-    if (rems.length) base.reminders = [...new Set([...base.reminders, ...rems])];
-    if (rep)         base.repeat = rep;
-    if (hora || fecha) base.status = 'scheduled';
-    return base;
-  };
-
-  /* ── Humanizar fecha ── */
   const humanDate = iso => {
-    const d   = new Date(iso + 'T12:00:00');
-    const hoy = new Date(); hoy.setHours(12,0,0,0);
-    const man = new Date(hoy); man.setDate(man.getDate() + 1);
-    if (d.toDateString() === hoy.toDateString()) return 'hoy';
-    if (d.toDateString() === man.toDateString()) return 'mañana';
-    const DD = ['domingo','lunes','martes','miércoles','jueves','viernes','sábado'];
-    const MM = ['enero','febrero','marzo','abril','mayo','junio',
-                'julio','agosto','septiembre','octubre','noviembre','diciembre'];
+    const d=new Date(iso+'T12:00:00'), hoy=new Date(); hoy.setHours(12,0,0,0);
+    const man=new Date(hoy); man.setDate(man.getDate()+1);
+    if(d.toDateString()===hoy.toDateString()) return 'hoy';
+    if(d.toDateString()===man.toDateString()) return 'mañana';
+    const DD=['domingo','lunes','martes','miércoles','jueves','viernes','sábado'];
+    const MM=['enero','febrero','marzo','abril','mayo','junio','julio','agosto','septiembre','octubre','noviembre','diciembre'];
     return `el ${DD[d.getDay()]} ${d.getDate()} de ${MM[d.getMonth()]}`;
   };
 
-  /* ── Frase de confirmación ── */
   const toSpeech = ev => {
-    const date = humanDate(ev.date);
-    const time = ev.time  ? `a las ${ev.time}` : ev.block ? `por la ${ev.block}` : '';
-    const rem  = ev.reminders.length
-      ? `aviso ${ev.reminders.map(r => r >= 60 ? `${r/60} hora${r > 60 ? 's' : ''}` : `${r} minutos`).join(' y ')} antes`
-      : '';
-    const rep  = ev.repeat || '';
-    return `${[ev.title, date, time, rem, rep].filter(Boolean).join(', ')}. ¿Lo guardo?`;
+    const parts=[ev.title, humanDate(ev.date)];
+    if(ev.time)  parts.push(`a las ${ev.time}`);
+    else if(ev.block) parts.push(`por la ${ev.block}`);
+    if(ev.reminders.length) parts.push(`aviso ${ev.reminders.map(r=>r>=60?`${r/60} hora${r>60?'s':''}` :`${r} minutos`).join(' y ')} antes`);
+    if(ev.repeat) parts.push(ev.repeat);
+    return parts.join(', ') + '. ¿Lo guardo?';
   };
 
-  const addDays = (d, n) => { const r = new Date(d); r.setDate(r.getDate() + n); return r; };
-
-  return { parse, merge, humanDate, toSpeech, norm };
+  const ad = (d,n) => { const r=new Date(d); r.setDate(r.getDate()+n); return r; };
+  return { parse, humanDate, toSpeech, norm:n };
 })();
 
-/* ══════════════════════════════════════════════════════════
+/* ============================================================
    SÍNTESIS DE VOZ
-   · Selección inteligente de voz española
-   · Parámetros ajustables en tiempo real
-   · Preferencia persistida en localStorage
-══════════════════════════════════════════════════════════ */
+   ============================================================ */
 const Voice = (() => {
+  let voices  = [];
+  let selName = localStorage.getItem('ag-voice') || '';
+  let cfg     = JSON.parse(localStorage.getItem('ag-vcfg') || '{"rate":0.88,"pitch":1.05}');
 
-  // Parámetros por defecto — ajustados para sonar natural
-  const defaults = { rate: 0.88, pitch: 1.05, volume: 1.0 };
-
-  // Cargar configuración guardada
-  let cfg = defaults;
-  try {
-    const saved = localStorage.getItem('algrano-voice');
-    if (saved) cfg = { ...defaults, ...JSON.parse(saved) };
-  } catch(_) {}
-
-  let _selectedVoice = null;   // voz elegida por el usuario
-  let _voices        = [];
-
-  /* Cargar voces del sistema */
-  const loadVoices = () => {
-    _voices = window.speechSynthesis?.getVoices() || [];
-    return _voices;
-  };
-
-  /* Ranking automático de voces españolas — prioriza las más naturales */
-  const rankVoice = v => {
-    const n = v.name.toLowerCase();
-    const l = v.lang.toLowerCase();
-    if (!l.startsWith('es')) return -1;
-    let score = 0;
-    // Voces neural/premium conocidas (las mejores)
-    if (n.includes('neural') || n.includes('natural'))  score += 100;
-    if (n.includes('google'))                           score += 80;
-    if (n.includes('premium') || n.includes('enhanced'))score += 70;
-    // Voces de sistema buenas por nombre
-    if (n.includes('monica'))   score += 60;   // macOS
-    if (n.includes('paulina'))  score += 60;   // macOS
-    if (n.includes('jorge'))    score += 55;   // macOS
-    if (n.includes('marisol'))  score += 55;   // macOS
-    if (n.includes('lucia'))    score += 50;
-    if (n.includes('diego'))    score += 50;
-    if (n.includes('carlos'))   score += 45;
-    if (n.includes('sabina'))   score += 45;
-    // Español de España > latinoamericano para este contexto
-    if (l === 'es-es')          score += 10;
-    // Voces locales son más rápidas y offline
-    if (v.localService)         score += 5;
-    return score;
-  };
-
-  /* Elegir la mejor voz disponible automáticamente */
-  const bestVoice = () => {
-    const vv = loadVoices();
-    if (!vv.length) return null;
-    // Si el usuario eligió una, usarla
-    if (_selectedVoice) {
-      const found = vv.find(v => v.name === _selectedVoice);
-      if (found) return found;
-    }
-    // Ranking automático
-    const spanish = vv.filter(v => v.lang.toLowerCase().startsWith('es'));
-    if (!spanish.length) return vv[0]; // fallback sin voz es
-    return spanish.sort((a,b) => rankVoice(b) - rankVoice(a))[0];
-  };
-
-  /* Hablar */
-  const speak = (text, cb) => {
-    if (!window.speechSynthesis) { cb && cb(); return; }
-    window.speechSynthesis.cancel();
-
-    const u     = new SpeechSynthesisUtterance(text);
-    u.lang      = 'es-ES';
-    u.rate      = cfg.rate;
-    u.pitch     = cfg.pitch;
-    u.volume    = cfg.volume;
-
-    const v = bestVoice();
-    if (v) u.voice = v;
-
-    console.log('[Voice] usando:', v?.name, `rate=${u.rate} pitch=${u.pitch}`);
-
-    // Workaround: Chrome a veces se congela en utterances largas
-    let resumed = false;
-    const keepAlive = setInterval(() => {
-      if (window.speechSynthesis.paused && !resumed) {
-        window.speechSynthesis.resume();
-        resumed = true;
-      }
-    }, 5000);
-
-    u.onend = () => { clearInterval(keepAlive); cb && cb(); };
-    u.onerror = e => {
-      clearInterval(keepAlive);
-      console.warn('[Voice] error:', e.error);
-      cb && cb();
-    };
-
-    window.speechSynthesis.speak(u);
-  };
-
-  const cancel = () => { window.speechSynthesis?.cancel(); };
-
-  /* Listar voces españolas disponibles */
-  const listSpanish = () => {
-    return loadVoices()
-      .filter(v => v.lang.toLowerCase().startsWith('es'))
-      .sort((a,b) => rankVoice(b) - rankVoice(a));
-  };
-
-  /* Seleccionar voz por nombre */
-  const selectVoice = name => {
-    _selectedVoice = name;
-    try { localStorage.setItem('algrano-voice', JSON.stringify({ ...cfg, voice: name })); } catch(_) {}
-  };
-
-  /* Actualizar parámetros */
-  const setParams = ({ rate, pitch, volume } = {}) => {
-    if (rate   !== undefined) cfg.rate   = rate;
-    if (pitch  !== undefined) cfg.pitch  = pitch;
-    if (volume !== undefined) cfg.volume = volume;
-    try { localStorage.setItem('algrano-voice', JSON.stringify(cfg)); } catch(_) {}
-  };
-
-  const getParams  = () => ({ ...cfg });
-  const getVoices  = () => _voices;
-  const getBest    = () => bestVoice()?.name || 'ninguna';
-
-  // Precargar voces en cuanto estén disponibles
+  const loadVoices = () => { voices = speechSynthesis.getVoices(); return voices; };
   if (window.speechSynthesis) {
     loadVoices();
-    window.speechSynthesis.onvoiceschanged = loadVoices;
+    speechSynthesis.onvoiceschanged = loadVoices;
   }
 
-  return { speak, cancel, listSpanish, selectVoice, setParams, getParams, getBest, loadVoices };
-})();
-
-/* ══════════════════════════════════════════════════════════
-   RECONOCIMIENTO DE VOZ — Push-to-talk
-   Patrón correcto probado en Chrome desktop + Android:
-   · continuous:true + interimResults:true → acumular texto
-   · onresult  → guardar último transcript (interim o final)
-   · onend     → se dispara tras stop(); procesar lo acumulado
-   NO esperar isFinal — eso es lo que fallaba antes
-══════════════════════════════════════════════════════════ */
-const SR = (() => {
-  const SRClass = window.SpeechRecognition || window.webkitSpeechRecognition;
-  if (!SRClass) return null;
-
-  let rec            = null;
-  let _onFinal       = null;
-  let _onErr         = null;
-  let _lastTranscript = '';   // acumulamos aquí todo lo que llegue
-  let _active        = false;
-  let _stopping      = false; // estamos en proceso de stop() voluntario
-
-  const _cleanup = () => {
-    _active   = false;
-    _stopping = false;
+  const rank = v => {
+    const nm = v.name.toLowerCase(), lg = v.lang.toLowerCase();
+    if (!lg.startsWith('es')) return -1;
+    let s = 0;
+    if (nm.includes('neural')||nm.includes('natural')) s+=100;
+    if (nm.includes('google'))    s+=80;
+    if (nm.includes('premium')||nm.includes('enhanced')) s+=70;
+    if (nm.includes('monica'))    s+=60;
+    if (nm.includes('paulina'))   s+=60;
+    if (nm.includes('jorge'))     s+=55;
+    if (nm.includes('marisol'))   s+=55;
+    if (nm.includes('lucia'))     s+=50;
+    if (nm.includes('diego'))     s+=50;
+    if (lg==='es-es')             s+=10;
+    if (v.localService)           s+=5;
+    return s;
   };
 
-  /* ── Iniciar grabación (push) ── */
+  const best = () => {
+    const vv = loadVoices();
+    if (selName) { const f=vv.find(v=>v.name===selName); if(f) return f; }
+    const sp = vv.filter(v=>v.lang.toLowerCase().startsWith('es'));
+    return sp.sort((a,b)=>rank(b)-rank(a))[0] || vv[0] || null;
+  };
+
+  const speak = (text, cb) => {
+    if (!window.speechSynthesis) { cb&&cb(); return; }
+    speechSynthesis.cancel();
+    const u = new SpeechSynthesisUtterance(text);
+    u.lang = 'es-ES'; u.rate = cfg.rate; u.pitch = cfg.pitch; u.volume = 1;
+    const v = best(); if(v) u.voice = v;
+    console.log('[Voice]', v?.name, 'rate='+u.rate, 'pitch='+u.pitch);
+    // Workaround Chrome bug: speechSynthesis se pausa sola en pestañas largas
+    const timer = setInterval(()=>{ if(speechSynthesis.paused) speechSynthesis.resume(); }, 5000);
+    u.onend = u.onerror = () => { clearInterval(timer); cb&&cb(); };
+    speechSynthesis.speak(u);
+  };
+
+  const cancel    = ()      => { speechSynthesis.cancel?.(); };
+  const listES    = ()      => loadVoices().filter(v=>v.lang.toLowerCase().startsWith('es')).sort((a,b)=>rank(b)-rank(a));
+  const selectV   = name    => { selName=name; localStorage.setItem('ag-voice',name); };
+  const setParams = p       => { cfg={...cfg,...p}; localStorage.setItem('ag-vcfg',JSON.stringify(cfg)); };
+  const getParams = ()      => ({...cfg});
+  const getBest   = ()      => best()?.name||'';
+
+  return { speak, cancel, listES, selectV, setParams, getParams, getBest, loadVoices };
+})();
+
+/* ============================================================
+   RECONOCIMIENTO DE VOZ — Push-to-talk
+   Patrón probado: continuous+interimResults, acumular en onresult,
+   procesar en onend (que se dispara siempre tras stop())
+   ============================================================ */
+const SR = (() => {
+  const Cls = window.SpeechRecognition || window.webkitSpeechRecognition;
+  if (!Cls) { console.warn('[SR] API no disponible'); return null; }
+
+  let rec        = null;
+  let transcript = '';   // texto acumulado durante la grabación
+  let active     = false;
+  let stopping   = false;
+  let cbFinal    = null;
+  let cbErr      = null;
+
   const start = (onFinal, onErr) => {
-    // Abortar instancia anterior limpiamente
-    if (rec) { try { rec.abort(); } catch(_) {} rec = null; }
+    // Limpiar instancia anterior
+    if (rec) { try { rec.abort(); } catch(_){} rec = null; }
+    cbFinal    = onFinal;
+    cbErr      = onErr;
+    transcript = '';
+    active     = false;
+    stopping   = false;
 
-    _onFinal        = onFinal;
-    _onErr          = onErr;
-    _lastTranscript = '';
-    _active         = false;
-    _stopping       = false;
-
-    rec = new SRClass();
-    rec.lang            = 'es-ES';
-    rec.continuous      = true;   // no para solo — nosotros llamamos stop()
-    rec.interimResults  = true;   // recibir resultados intermedios para feedback visual
+    rec = new Cls();
+    rec.lang           = 'es-ES';
+    rec.continuous     = true;   // no para solo por silencio
+    rec.interimResults = true;   // resultados en tiempo real para mostrar texto
     rec.maxAlternatives = 1;
 
     rec.onstart = () => {
-      _active = true;
-      _lastTranscript = '';
+      active = true;
       console.log('[SR] grabando…');
     };
 
     rec.onresult = e => {
-      // Acumular TODO el transcript (interim + final)
-      // Esto es lo que tendremos disponible cuando onend se dispare
-      let full = '';
-      for (let i = 0; i < e.results.length; i++) {
-        full += e.results[i][0].transcript;
-      }
-      _lastTranscript = full.trim();
-
+      // Acumular TODO el texto recibido hasta ahora
+      let t = '';
+      for (let i = 0; i < e.results.length; i++) t += e.results[i][0].transcript;
+      transcript = t.trim();
       // Mostrar en pantalla en tiempo real
       const el = document.getElementById('transcriptText');
-      if (el && _lastTranscript) el.textContent = _lastTranscript;
+      if (el) el.textContent = transcript;
     };
 
     rec.onend = () => {
-      console.log('[SR] onend · transcript="' + _lastTranscript + '" stopping=' + _stopping);
-      _cleanup();
-
-      if (_stopping) {
-        // Stop voluntario (usuario soltó el botón)
-        if (_lastTranscript) {
-          _onFinal && _onFinal(_lastTranscript);
-        } else {
-          // Soltó sin hablar nada
-          _onErr && _onErr('no-speech');
-        }
+      console.log('[SR] onend — stopping:', stopping, '— transcript:', transcript);
+      active = false;
+      if (stopping) {
+        // Stop voluntario: procesar lo grabado
+        if (transcript) cbFinal?.(transcript);
+        else            cbErr?.('no-speech');
       }
-      // Si no es stopping → fue abort() o error → no hacer nada
+      // abort() voluntario → stopping=false → no hacer nada
     };
 
     rec.onerror = e => {
-      console.warn('[SR] onerror:', e.error);
-      _cleanup();
-      if (e.error === 'aborted') return; // abort() voluntario, ignorar
-      const silentErrors = ['no-speech', 'audio-capture'];
-      _onErr && _onErr(silentErrors.includes(e.error) ? 'no-speech' : e.error);
+      console.warn('[SR] error:', e.error);
+      active = false;
+      if (e.error === 'aborted') return;
+      cbErr?.(e.error);
     };
 
-    // Delay mínimo para que el navegador procese el evento táctil
+    // 50ms de delay — Chrome necesita un tick tras el evento táctil/click
     setTimeout(() => {
       if (!rec) return;
       try {
         rec.start();
+        console.log('[SR] start() llamado');
       } catch(e) {
-        console.warn('[SR] start() excepción:', e.name);
-        if (e.name === 'InvalidStateError') {
-          setTimeout(() => { try { rec && rec.start(); } catch(_) {} }, 300);
-        }
+        console.error('[SR] start() excepción:', e.name, e.message);
+        cbErr?.(e.name === 'InvalidStateError' ? 'busy' : 'start-error');
       }
     }, 50);
   };
 
-  /* ── Parar grabación (release) → dispara onend → procesa transcript ── */
+  // Usuario suelta el botón → parar y procesar
   const stop = () => {
-    if (rec && _active) {
-      _stopping = true;
-      console.log('[SR] stop() llamado, transcript hasta ahora:', _lastTranscript);
+    console.log('[SR] stop() — active:', active);
+    if (active) {
+      stopping = true;
       try { rec.stop(); } catch(e) { console.warn('[SR] stop() err:', e); }
     } else {
-      // Si no estaba activo todavía (stop muy rápido), notificar no-speech
-      _onErr && _onErr('no-speech');
+      // Soltó antes de que empezara (muy rápido)
+      cbErr?.('no-speech');
     }
   };
 
-  /* ── Abortar sin procesar (cancelar) ── */
+  // Cancelar sin procesar
   const abort = () => {
-    _stopping = false; // marcar como no-voluntario para que onend no procese
-    if (rec) { try { rec.abort(); } catch(_) {} rec = null; }
-    _cleanup();
+    stopping = false;
+    if (rec) { try { rec.abort(); } catch(_){} rec = null; }
+    active = false;
   };
 
-  const isOn = () => _active;
-
+  const isOn = () => active;
   return { start, stop, abort, isOn };
 })();
 
-/* ══════════════════════════════════════════════════════════
+/* ============================================================
    NOTIFICACIONES
-══════════════════════════════════════════════════════════ */
+   ============================================================ */
 const Notif = (() => {
-  const request = () => {
-    if ('Notification' in window && Notification.permission === 'default') {
-      Notification.requestPermission();
-    }
-  };
-  const schedule = ev => {
-    if (!ev.time || !ev.reminders.length) return;
-    if (!('Notification' in window) || Notification.permission !== 'granted') return;
-    const evDate = new Date(`${ev.date}T${ev.time}:00`);
-    ev.reminders.forEach(mins => {
-      const delay = evDate.getTime() - mins * 60000 - Date.now();
-      if (delay > 0 && delay < 86400000) {
-        setTimeout(() => new Notification(`⏰ ${ev.title}`, {
-          body: `En ${mins} minutos`,
-          icon: 'icons/icon-192.png',
-          tag:  `${ev.id}-${mins}`
-        }), delay);
-      }
+  const req = () => { if('Notification'in window && Notification.permission==='default') Notification.requestPermission(); };
+  const sch = ev => {
+    if(!ev.time||!ev.reminders.length) return;
+    if(!('Notification'in window)||Notification.permission!=='granted') return;
+    const d = new Date(`${ev.date}T${ev.time}:00`);
+    ev.reminders.forEach(m => {
+      const delay = d.getTime() - m*60000 - Date.now();
+      if(delay>0&&delay<86400000) setTimeout(()=>new Notification(`⏰ ${ev.title}`,{body:`En ${m} minutos`,icon:'./icons/icon-192.png'}), delay);
     });
   };
-  return { request, schedule };
+  return { req, sch };
 })();
 
-/* ══════════════════════════════════════════════════════════
-   UI
-══════════════════════════════════════════════════════════ */
+/* ============================================================
+   UI — helpers
+   ============================================================ */
 const UI = (() => {
-  const $     = id => document.getElementById(id);
-  const micBtn      = $('micBtn');
-  const statusLabel = $('statusLabel');
-  const transcriptEl= $('transcriptText');
-  const confirmCard = $('confirmCard');
-  const confirmPrev = $('confirmPreview');
-  const toastsEl    = $('toasts');
+  const $ = id => document.getElementById(id);
 
-  /* ── Toast ── */
-  const toast = (msg, type = 'inf', ms = 3200) => {
-    const el = document.createElement('div');
-    el.className = `toast ${type}`;
-    el.textContent = msg;
-    toastsEl.appendChild(el);
-    setTimeout(() => el.remove(), ms);
+  const toast = (msg, type='inf', ms=3200) => {
+    const el=document.createElement('div'); el.className=`toast ${type}`; el.textContent=msg;
+    $('toasts').appendChild(el); setTimeout(()=>el.remove(), ms);
   };
 
-  /* ── Modo ── */
   const setMode = mode => {
-    micBtn.classList.remove('listening', 'processing');
-    statusLabel.classList.remove('listening');
-    switch (mode) {
+    const btn   = $('micBtn');
+    const label = $('statusLabel');
+    btn.classList.remove('listening','processing','pressed');
+    label.classList.remove('listening');
+    switch(mode) {
       case 'idle':
-        statusLabel.textContent = 'Mantén pulsado para hablar';
-        transcriptEl.textContent = '';
-        confirmCard.hidden = true;
+        label.textContent='Mantén pulsado para hablar';
+        $('transcriptText').textContent='';
+        $('confirmCard').hidden=true;
         break;
       case 'listening':
-        statusLabel.textContent = 'Suelta cuando termines…';
-        statusLabel.classList.add('listening');
-        micBtn.classList.add('listening');
-        confirmCard.hidden = true;
+        label.textContent='Suelta cuando termines…';
+        label.classList.add('listening');
+        btn.classList.add('listening','pressed');
+        $('confirmCard').hidden=true;
         break;
       case 'processing':
-        statusLabel.textContent = 'Procesando…';
-        micBtn.classList.add('processing');
+        label.textContent='Procesando…';
+        btn.classList.add('processing');
         break;
       case 'confirming':
-        statusLabel.textContent = 'Mantén pulsado para responder';
-        statusLabel.classList.add('listening');
-        micBtn.classList.add('listening');
+        label.textContent='Mantén pulsado para responder';
+        label.classList.add('listening');
+        $('confirmCard').hidden=false;
         break;
     }
   };
 
-  /* ── Confirmación ── */
   const showConfirm = ev => {
     const date = NLP.humanDate(ev.date);
-    const time = ev.time
-      ? `<strong>${ev.time}</strong>`
-      : ev.block ? `por la <strong>${ev.block}</strong>` : '<small>sin hora fija</small>';
+    const time = ev.time ? `<strong>${ev.time}</strong>`
+               : ev.block ? `por la <strong>${ev.block}</strong>`
+               : '<small>sin hora</small>';
     const rem = ev.reminders.length
-      ? `<br><small>🔔 ${ev.reminders.map(r => r >= 60 ? `${r/60}h` : `${r}min`).join(', ')} antes</small>`
-      : '';
+      ? `<br><small>🔔 ${ev.reminders.map(r=>r>=60?`${r/60}h`:`${r}min`).join(', ')} antes</small>` : '';
     const rep = ev.repeat ? `<br><small>🔁 ${ev.repeat}</small>` : '';
-    confirmPrev.innerHTML = `<strong>${ev.title}</strong><br>${date} ${time}${rem}${rep}`;
-    confirmCard.hidden = false;
+    $('confirmPreview').innerHTML = `<strong>${ev.title}</strong><br>${date} ${time}${rem}${rep}`;
   };
 
-  return { toast, setMode, showConfirm, transcriptEl, statusLabel };
+  return { toast, setMode, showConfirm };
 })();
 
-/* ══════════════════════════════════════════════════════════
+/* ============================================================
    PANEL DE EVENTOS
-══════════════════════════════════════════════════════════ */
+   ============================================================ */
 const Panel = (() => {
-  const $       = id => document.getElementById(id);
-  const panel   = $('panel');
-  const overlay = $('overlay');
-  let filter    = 'hoy';
+  const $ = id => document.getElementById(id);
+  let filter = 'hoy';
+  const ad = (d,n) => { const r=new Date(d); r.setDate(r.getDate()+n); return r; };
 
-  const open  = () => { panel.classList.add('open'); overlay.classList.add('on'); render(); };
-  const close = () => { panel.classList.remove('open'); overlay.classList.remove('on'); };
-
-  const addDays = (d, n) => { const r = new Date(d); r.setDate(r.getDate() + n); return r; };
+  const open  = () => { $('panel').classList.add('open');  $('overlay').classList.add('on');      render(); };
+  const close = () => { $('panel').classList.remove('open'); $('overlay').classList.remove('on'); };
 
   const render = async () => {
-    const all   = await DB.getAll();
-    const hoy   = new Date(); hoy.setHours(0,0,0,0);
-    const todayS = hoy.toISOString().split('T')[0];
-    const tomS   = addDays(hoy, 1).toISOString().split('T')[0];
-    const weekS  = addDays(hoy, 7).toISOString().split('T')[0];
+    const all  = await DB.getAll();
+    const hoy  = new Date(); hoy.setHours(0,0,0,0);
+    const ts   = hoy.toISOString().split('T')[0];
+    const tm   = ad(hoy,1).toISOString().split('T')[0];
+    const tw   = ad(hoy,7).toISOString().split('T')[0];
 
-    let evs;
-    switch (filter) {
-      case 'hoy':        evs = all.filter(e => e.date === todayS && e.status !== 'pending'); break;
-      case 'mañana':     evs = all.filter(e => e.date === tomS);   break;
-      case 'semana':     evs = all.filter(e => e.date >= todayS && e.date <= weekS); break;
-      case 'pendientes': evs = all.filter(e => e.status === 'pending'); break;
-      default:           evs = all;
-    }
-    evs.sort((a, b) => (a.date + (a.time || '99:99')).localeCompare(b.date + (b.time || '99:99')));
+    const evs = all.filter(e => {
+      if(filter==='hoy')        return e.date===ts && e.status!=='pending';
+      if(filter==='mañana')     return e.date===tm;
+      if(filter==='semana')     return e.date>=ts && e.date<=tw;
+      if(filter==='pendientes') return e.status==='pending';
+      return true;
+    }).sort((a,b)=>(a.date+(a.time||'99:99')).localeCompare(b.date+(b.time||'99:99')));
 
     const list = $('eventsList');
-    if (!evs.length) {
-      list.innerHTML = '<p class="empty-state">Nada aquí aún.<br>Pulsa el micrófono y habla.</p>';
-      return;
-    }
+    if (!evs.length) { list.innerHTML='<p class="empty-state">Nada aquí.<br>Pulsa el micrófono y habla.</p>'; return; }
 
-    const groups = {};
-    evs.forEach(e => {
-      const k = e.status === 'pending' ? 'Pendientes' : NLP.humanDate(e.date);
-      (groups[k] = groups[k] || []).push(e);
-    });
+    const groups={};
+    evs.forEach(e=>{ const k=e.status==='pending'?'Pendientes':NLP.humanDate(e.date); (groups[k]=groups[k]||[]).push(e); });
+    list.innerHTML='';
 
-    list.innerHTML = '';
-    for (const [day, items] of Object.entries(groups)) {
-      const g = document.createElement('div');
-      g.className = 'day-group';
-      g.innerHTML = `<p class="day-label">${day}</p>`;
-      items.forEach(ev => {
-        const meta = [
-          ev.reminders.length ? `🔔 ${ev.reminders.join(',')}min` : '',
-          ev.repeat ? `🔁 ${ev.repeat}` : ''
-        ].filter(Boolean).join(' · ');
-        const d = document.createElement('div');
-        d.className = `ev-item${ev.status === 'pending' ? ' pending' : ''}`;
-        d.innerHTML = `
-          <div class="ev-time ${!ev.time ? 'no-t' : ''}">${ev.time || '—'}</div>
+    for (const [day,items] of Object.entries(groups)) {
+      const g=document.createElement('div'); g.className='day-group';
+      g.innerHTML=`<p class="day-label">${day}</p>`;
+      items.forEach(ev=>{
+        const meta=[ev.reminders.length?`🔔 ${ev.reminders.join(',')}min`:'', ev.repeat?`🔁 ${ev.repeat}`:''].filter(Boolean).join(' · ');
+        const d=document.createElement('div'); d.className=`ev-item${ev.status==='pending'?' pending':''}`;
+        d.innerHTML=`
+          <div class="ev-time ${!ev.time?'no-t':''}">${ev.time||'—'}</div>
           <div class="ev-info">
             <div class="ev-title">${ev.title}</div>
-            ${meta ? `<div class="ev-meta">${meta}</div>` : ''}
+            ${meta?`<div class="ev-meta">${meta}</div>`:''}
           </div>
-          <button class="ev-del" data-id="${ev.id}" title="Eliminar">
+          <button class="ev-del" data-id="${ev.id}">
             <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
-              <polyline points="3 6 5 6 21 6"/>
-              <path d="M19 6l-1 14H6L5 6"/>
-              <path d="M10 11v6M14 11v6"/>
-              <path d="M9 6V4h6v2"/>
+              <polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14H6L5 6"/>
+              <path d="M10 11v6M14 11v6"/><path d="M9 6V4h6v2"/>
             </svg>
           </button>`;
-        d.querySelector('.ev-del').addEventListener('click', async e => {
-          await DB.remove(e.currentTarget.dataset.id);
-          render();
-          UI.toast('Evento eliminado', 'inf');
+        d.querySelector('.ev-del').addEventListener('click', async e=>{
+          await DB.del(e.currentTarget.dataset.id); render(); UI.toast('Eliminado','inf');
         });
         g.appendChild(d);
       });
@@ -722,13 +474,11 @@ const Panel = (() => {
   const init = () => {
     $('btnPanel').addEventListener('click', open);
     $('btnClose').addEventListener('click', close);
-    overlay.addEventListener('click', close);
-    document.querySelectorAll('.tab').forEach(t => {
-      t.addEventListener('click', () => {
-        document.querySelectorAll('.tab').forEach(x => x.classList.remove('active'));
-        t.classList.add('active');
-        filter = t.dataset.f;
-        render();
+    $('overlay').addEventListener('click', close);
+    $('tabs').querySelectorAll('.tab').forEach(t=>{
+      t.addEventListener('click', ()=>{
+        $('tabs').querySelectorAll('.tab').forEach(x=>x.classList.remove('active'));
+        t.classList.add('active'); filter=t.dataset.f; render();
       });
     });
   };
@@ -736,79 +486,49 @@ const Panel = (() => {
   return { init, render };
 })();
 
-
-/* ══════════════════════════════════════════════════════════
-   AJUSTES DE VOZ — Modal
-══════════════════════════════════════════════════════════ */
+/* ============================================================
+   AJUSTES DE VOZ
+   ============================================================ */
 const VoiceSettings = (() => {
   const $ = id => document.getElementById(id);
 
   const open = () => {
-    populate();
     $('voiceModal').classList.add('open');
     $('overlayVoice').classList.add('on');
+    populate();
   };
-
   const close = () => {
     $('voiceModal').classList.remove('open');
     $('overlayVoice').classList.remove('on');
   };
 
   const populate = () => {
-    const voices  = Voice.listSpanish();
-    const select  = $('voiceSelect');
-    const best    = Voice.getBest();
-    const params  = Voice.getParams();
+    const voices = Voice.listES();
+    const sel    = $('voiceSelect');
+    const best   = Voice.getBest();
+    const prm    = Voice.getParams();
 
-    // Rellenar selector de voces
-    select.innerHTML = '';
+    sel.innerHTML = voices.length
+      ? voices.map(v=>`<option value="${v.name}" ${v.name===best?'selected':''}>${v.name}${v.name===best?' ★':''} (${v.lang})</option>`).join('')
+      : '<option value="">No hay voces en español instaladas</option>';
 
-    if (!voices.length) {
-      select.innerHTML = '<option value="">No hay voces españolas instaladas</option>';
-    } else {
-      voices.forEach(v => {
-        const opt = document.createElement('option');
-        opt.value = v.name;
-        // Indicar si es la mejor automática
-        const tag = v.name === best ? ' ★' : '';
-        opt.textContent = `${v.name}${tag} (${v.lang})`;
-        if (v.name === best) opt.selected = true;
-        select.appendChild(opt);
-      });
-    }
+    sel.onchange = () => Voice.selectV(sel.value);
 
-    // Sliders
-    const rateR  = $('rateRange');
-    const pitchR = $('pitchRange');
-    rateR.value  = params.rate;
-    pitchR.value = params.pitch;
-    $('rateVal').textContent  = params.rate.toFixed(2);
-    $('pitchVal').textContent = params.pitch.toFixed(2);
-
-    rateR.oninput = () => {
-      const v = parseFloat(rateR.value);
-      $('rateVal').textContent = v.toFixed(2);
-      Voice.setParams({ rate: v });
-    };
-    pitchR.oninput = () => {
-      const v = parseFloat(pitchR.value);
-      $('pitchVal').textContent = v.toFixed(2);
-      Voice.setParams({ pitch: v });
-    };
-
-    // Cambio de voz
-    select.onchange = () => {
-      Voice.selectVoice(select.value);
-    };
+    const rr = $('rateRange'),  pr = $('pitchRange');
+    const rv = $('rateVal'),    pv = $('pitchVal');
+    rr.value = prm.rate;  rv.textContent = prm.rate.toFixed(2);
+    pr.value = prm.pitch; pv.textContent = prm.pitch.toFixed(2);
+    rr.oninput = () => { Voice.setParams({rate:parseFloat(rr.value)});  rv.textContent=parseFloat(rr.value).toFixed(2); };
+    pr.oninput = () => { Voice.setParams({pitch:parseFloat(pr.value)}); pv.textContent=parseFloat(pr.value).toFixed(2); };
   };
 
   const init = () => {
     $('btnVoiceSettings').addEventListener('click', open);
-    $('btnCloseVoice').addEventListener('click', close);
-    $('overlayVoice').addEventListener('click', close);
-    $('btnTestVoice').addEventListener('click', () => {
+    $('btnCloseVoice').addEventListener('click',   close);
+    $('overlayVoice').addEventListener('click',    close);
+    $('btnTestVoice').addEventListener('click', ()=>{
+      Voice.selectV($('voiceSelect').value);
       Voice.cancel();
-      Voice.selectVoice($('voiceSelect').value);
       Voice.speak('Hola, esto es Al Grano. ¿Cómo suena esta voz?');
     });
   };
@@ -816,212 +536,161 @@ const VoiceSettings = (() => {
   return { init };
 })();
 
-/* ══════════════════════════════════════════════════════════
-   APP — Orquestador (Push-to-talk)
-
-   FLUJO:
-   · Idle       → mantener pulsado → graba → soltar → procesa
-   · Confirming → mantener pulsado → graba → soltar → evalúa sí/no
-   · Teclado    → Espacio funciona igual (keydown=start, keyup=stop)
-══════════════════════════════════════════════════════════ */
+/* ============================================================
+   APP — orquestador push-to-talk
+   ============================================================ */
 const App = (() => {
-  let mode    = 'idle';
-  let pending = null;
-  let phase   = 'event';    // 'event' | 'confirm'
-  let pressing = false;     // está el botón pulsado ahora mismo
+  let mode     = 'idle';
+  let pending  = null;
+  let phase    = 'event';   // 'event' | 'confirm'
+  let pressing = false;
 
   const setMode = m => { mode = m; UI.setMode(m); };
 
-  /* ════════════════════════════════════════
-     PUSH — inicio de grabación
-  ════════════════════════════════════════ */
-  const onPressStart = e => {
-    e.preventDefault();   // evita scroll en móvil, doble-tap zoom, etc.
-    if (pressing) return; // ignorar si ya está pulsado (multitouch)
+  /* ── PRESS (inicio grabación) ── */
+  const onPress = e => {
+    e.preventDefault();
+    if (pressing) return;
     pressing = true;
-    document.getElementById('micBtn').classList.add('pressed');
 
-    if (!SR) {
-      UI.toast('Voz no disponible. Usa el campo de texto.', 'err', 5000);
-      return;
-    }
+    if (!SR) { UI.toast('Reconocimiento de voz no disponible','err',5000); return; }
 
-    // Cancelar síntesis si estaba hablando
     Voice.cancel();
-
-    // Determinar fase: ¿estamos esperando confirmación o nuevo evento?
     phase = (mode === 'confirming') ? 'confirm' : 'event';
-
     setMode('listening');
 
     SR.start(
-      // onFinal — se llama cuando rec.stop() procesa el audio
+      // onFinal — se llama desde onend tras stop()
       text => {
-        UI.transcriptEl.textContent = text;
+        pressing = false;
         if (phase === 'confirm') processConfirm(text);
-        else                     processText(text);
+        else                     processEvent(text);
       },
-      // onErr — no habló, error de red, etc.
+      // onErr
       err => {
         pressing = false;
-        if (err === 'not-allowed') {
-          UI.toast('Permiso de micrófono denegado. Actívalo en ajustes del navegador.', 'err', 6000);
-          setMode('idle');
-        } else if (err === 'network') {
-          UI.toast('Sin conexión. El reconocimiento requiere internet en Chrome.', 'err', 6000);
-          setMode('idle');
-        } else if (err === 'no-speech' || err === 'silent') {
-          // No dijo nada — volver al estado anterior sin ruido
-          setMode(phase === 'confirm' ? 'confirming' : 'idle');
-        } else {
-          setMode('idle');
-        }
+        console.log('[App] SR err:', err);
+        if      (err === 'not-allowed') UI.toast('Permiso de micrófono denegado. Ve a ajustes del navegador.','err',7000);
+        else if (err === 'network')     UI.toast('Sin conexión. Chrome necesita internet para el reconocimiento.','err',6000);
+        else if (err === 'no-speech')   { /* silencioso — no habló nada */ }
+        else                            UI.toast(`Error: ${err}`,'err',4000);
+        setMode(phase==='confirm' ? 'confirming' : 'idle');
       }
     );
   };
 
-  /* ════════════════════════════════════════
-     RELEASE — fin de grabación → procesar
-  ════════════════════════════════════════ */
-  const onPressEnd = e => {
+  /* ── RELEASE (fin grabación) ── */
+  const onRelease = e => {
     e.preventDefault();
     if (!pressing) return;
-    pressing = false;
-    document.getElementById('micBtn').classList.remove('pressed');
-
-    if (!SR) return;
-
-    // Pasar a "procesando" visualmente
-    setMode('processing');
-    // stop() → onend se dispara → onFinal se llama con el transcript acumulado
-    SR.stop();
-  };
-
-  /* ════════════════════════════════════════
-     PROCESAR EVENTO
-  ════════════════════════════════════════ */
-  const processText = text => {
-    setMode('processing');
-    const ev = NLP.parse(text);
-    pending  = ev;
-    setTimeout(() => {
-      UI.showConfirm(ev);
-      setMode('confirming');
-      // Leer la confirmación en voz alta
-      Voice.speak(NLP.toSpeech(ev));
-    }, 200);
-  };
-
-  /* ════════════════════════════════════════
-     PROCESAR CONFIRMACIÓN
-  ════════════════════════════════════════ */
-  const processConfirm = text => {
-    const n = NLP.norm(text);
-    console.log('[App] confirmación:', n);
-    if (CONFIRM_YES.some(w => n.includes(w)))     saveEvent();
-    else if (CONFIRM_NO.some(w => n.includes(w))) cancelEvent();
-    else {
-      UI.toast('No entendí. Pulsa para decir "sí" o "no".', 'inf');
-      setMode('confirming');
+    // pressing se pone false en los callbacks de SR (onFinal/onErr)
+    // Aquí solo paramos la grabación
+    if (SR?.isOn()) {
+      setMode('processing');
+      SR.stop();
+    } else {
+      pressing = false;
     }
   };
 
-  /* ════════════════════════════════════════
-     GUARDAR
-  ════════════════════════════════════════ */
+  /* ── Procesar frase del evento ── */
+  const processEvent = text => {
+    setMode('processing');
+    pending = NLP.parse(text);
+    setTimeout(() => {
+      UI.showConfirm(pending);
+      setMode('confirming');
+      Voice.speak(NLP.toSpeech(pending));
+    }, 150);
+  };
+
+  /* ── Procesar confirmación ── */
+  const processConfirm = text => {
+    const s = NLP.norm(text);
+    console.log('[App] confirm:', s);
+    if      (CONFIRM_YES.some(w=>s.includes(w))) saveEvent();
+    else if (CONFIRM_NO.some(w=>s.includes(w)))  cancelEvent();
+    else { UI.toast('Di "sí" para guardar o "no" para cancelar','inf'); setMode('confirming'); }
+  };
+
+  /* ── Guardar ── */
   const saveEvent = async () => {
-    Voice.cancel();
-    SR.abort();
+    Voice.cancel(); SR?.abort();
     if (!pending) { setMode('idle'); return; }
     try {
       await DB.add(pending);
-      Notif.schedule(pending);
-      UI.toast(`✓ ${pending.title} guardado`, 'ok');
+      Notif.sch(pending);
+      UI.toast(`✓ ${pending.title} guardado`,'ok');
       Voice.speak(`Guardado. ${pending.title}.`);
       pending = null;
       setMode('idle');
-    } catch(e) {
-      console.error('[DB]', e);
-      UI.toast('Error al guardar', 'err');
-      setMode('idle');
-    }
+    } catch(e) { console.error(e); UI.toast('Error al guardar','err'); setMode('idle'); }
   };
 
-  /* ════════════════════════════════════════
-     CANCELAR
-  ════════════════════════════════════════ */
+  /* ── Cancelar ── */
   const cancelEvent = () => {
-    Voice.cancel();
-    SR.abort();
-    pending = null;
+    Voice.cancel(); SR?.abort();
+    pending = null; pressing = false;
     setMode('idle');
     Voice.speak('Cancelado.');
-    UI.toast('Cancelado', 'inf');
+    UI.toast('Cancelado','inf');
   };
 
-  /* ════════════════════════════════════════
-     TEXTO FALLBACK
-  ════════════════════════════════════════ */
+  /* ── Texto fallback ── */
   const submitText = () => {
     const val = document.getElementById('textInput').value.trim();
     if (!val) return;
     document.getElementById('textInput').value = '';
-    UI.transcriptEl.textContent = val;
+    document.getElementById('transcriptText').textContent = val;
     if (mode === 'confirming') processConfirm(val);
-    else                       processText(val);
+    else                       processEvent(val);
   };
 
-  /* ════════════════════════════════════════
-     INIT
-  ════════════════════════════════════════ */
+  /* ── INIT ── */
   const init = async () => {
     await DB.open();
     Panel.init();
     VoiceSettings.init();
-    Notif.request();
+    Notif.req();
 
     const btn = document.getElementById('micBtn');
 
-    // ── Touch (móvil) ──
-    btn.addEventListener('touchstart', onPressStart, { passive: false });
-    btn.addEventListener('touchend',   onPressEnd,   { passive: false });
-    btn.addEventListener('touchcancel',onPressEnd,   { passive: false });
+    // Touch (móvil): passive:false para poder preventDefault
+    btn.addEventListener('touchstart',  onPress,   { passive:false });
+    btn.addEventListener('touchend',    onRelease, { passive:false });
+    btn.addEventListener('touchcancel', onRelease, { passive:false });
 
-    // ── Mouse (escritorio) ──
-    btn.addEventListener('mousedown', onPressStart);
-    btn.addEventListener('mouseup',   onPressEnd);
-    btn.addEventListener('mouseleave',e => { if (pressing) onPressEnd(e); });
+    // Mouse (escritorio)
+    btn.addEventListener('mousedown', onPress);
+    btn.addEventListener('mouseup',   onRelease);
+    // Si el ratón sale del botón mientras está pulsado
+    btn.addEventListener('mouseleave', e => { if(pressing) onRelease(e); });
 
-    // ── Teclado: Espacio (escritorio) ──
+    // Teclado: Espacio
     document.addEventListener('keydown', e => {
-      if (e.code === 'Space' && e.target === document.body && !e.repeat) {
-        onPressStart(e);
-      }
+      if (e.code==='Space' && !e.repeat && e.target===document.body) onPress(e);
     });
     document.addEventListener('keyup', e => {
-      if (e.code === 'Space' && e.target === document.body) {
-        onPressEnd(e);
-      }
+      if (e.code==='Space' && e.target===document.body) onRelease(e);
     });
 
-    // ── Botones de confirmación manual ──
+    // Botones confirmación manual
     document.getElementById('btnYes').addEventListener('click', saveEvent);
     document.getElementById('btnNo').addEventListener('click',  cancelEvent);
 
-    // ── Texto fallback ──
+    // Input texto
     document.getElementById('btnSend').addEventListener('click', submitText);
     document.getElementById('textInput').addEventListener('keydown', e => {
-      if (e.key === 'Enter') { e.preventDefault(); submitText(); }
+      if (e.key==='Enter') { e.preventDefault(); submitText(); }
     });
 
-    if (!SR) {
-      document.getElementById('statusLabel').textContent = 'Escribe tu evento abajo';
-    }
+    if (!SR) document.getElementById('statusLabel').textContent = 'Escribe tu evento abajo';
 
-    console.log('[App] listo ✓ (push-to-talk)');
+    console.log('[App] listo ✓ — push-to-talk activo');
   };
 
   return { init, saveEvent, cancelEvent };
 })();
 
+/* ── Arrancar ── */
 document.addEventListener('DOMContentLoaded', App.init);
