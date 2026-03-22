@@ -392,6 +392,23 @@ body {
 .toast.err { border-color: rgba(192,57,43,.4);  color: #e57070; }
 .toast.inf { border-color: var(--border-hi);    color: var(--amber); }
 
+
+/* ── Estado pulsado (push-to-talk) ──────── */
+.mic-btn:active .mic-core,
+.mic-btn.pressed .mic-core {
+  background: rgba(232,168,48,0.28);
+  border-color: var(--amber);
+  box-shadow:
+    0 0 80px rgba(232,168,48,0.35),
+    0 0 0 2px var(--amber),
+    inset 0 1px 0 rgba(255,255,255,.06);
+  transform: scale(0.95);   /* se "hunde" al pulsar */
+}
+.mic-btn.pressed .ring { opacity: 1; }
+.mic-btn.pressed .ring:nth-child(1) { animation: ripple 1.2s ease-out infinite 0.0s; }
+.mic-btn.pressed .ring:nth-child(2) { animation: ripple 1.2s ease-out infinite 0.4s; }
+.mic-btn.pressed .ring:nth-child(3) { animation: ripple 1.2s ease-out infinite 0.8s; }
+
 /* ── MISC ───────────────────────────────── */
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation-duration: .01ms !important; }

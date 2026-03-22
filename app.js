@@ -307,77 +307,105 @@ const Voice = (() => {
 })();
 
 /* ══════════════════════════════════════════════════════════
-   RECONOCIMIENTO DE VOZ
-   — Robusto para Chrome desktop y Android —
+   RECONOCIMIENTO DE VOZ — Push-to-talk
+   · continuous:true  → graba mientras el botón está pulsado
+   · Al soltar → rec.stop() → onresult dispara → procesa
 ══════════════════════════════════════════════════════════ */
 const SR = (() => {
   const SRClass = window.SpeechRecognition || window.webkitSpeechRecognition;
   if (!SRClass) return null;
 
-  let rec        = null;
-  let active     = false;
-  let gotResult  = false;
-  let finalSent  = false;
+  let rec       = null;
+  let active    = false;
+  let finalSent = false;
+  let onFinalCb = null;
+  let onErrCb   = null;
 
-  const start = (onFinal, onErr) => {
-    // Abortar instancia anterior si existe
-    if (rec && active) { try { rec.abort(); } catch(e) {} }
-
+  /* Crea e inicia una nueva instancia */
+  const _create = () => {
+    if (rec) { try { rec.abort(); } catch(_) {} }
     rec       = new SRClass();
-    rec.lang  = 'es-ES';
-    rec.interimResults  = false;   // false = más estable en Chrome móvil
+    rec.lang            = 'es-ES';
+    rec.interimResults  = true;   // queremos interim para mostrar texto en tiempo real
     rec.maxAlternatives = 1;
-    rec.continuous      = false;
+    rec.continuous      = true;   // no para solo por silencio — para cuando llamemos stop()
     active    = false;
-    gotResult = false;
     finalSent = false;
 
     rec.onstart = () => {
       active    = true;
-      gotResult = false;
       finalSent = false;
-      console.log('[SR] iniciado');
+      console.log('[SR] grabando…');
     };
 
     rec.onresult = e => {
-      gotResult = true;
-      if (!finalSent && e.results[0].isFinal) {
+      // Mostrar interim en tiempo real
+      let interim = '', final = '';
+      for (let i = e.resultIndex; i < e.results.length; i++) {
+        if (e.results[i].isFinal) final   += e.results[i][0].transcript;
+        else                       interim += e.results[i][0].transcript;
+      }
+      // Actualizar transcripción visual
+      const display = final || interim;
+      if (display) {
+        const el = document.getElementById('transcriptText');
+        if (el) el.textContent = display;
+      }
+      // Si hay resultado final lo procesamos
+      if (final && !finalSent) {
         finalSent = true;
-        const text = e.results[0][0].transcript;
-        console.log('[SR] resultado:', text);
-        onFinal(text);
+        console.log('[SR] resultado final:', final);
+        onFinalCb && onFinalCb(final);
       }
     };
 
     rec.onend = () => {
-      console.log('[SR] onend · gotResult=', gotResult);
+      console.log('[SR] onend · finalSent=', finalSent);
       active = false;
-      if (!finalSent) onErr && onErr(gotResult ? null : 'no-speech');
+      // Si paró sin resultado (ej: usuario no habló nada)
+      if (!finalSent) onErrCb && onErrCb('no-speech');
     };
 
     rec.onerror = e => {
       console.warn('[SR] onerror:', e.error);
       if (e.error === 'aborted') { active = false; return; }
       active = false;
-      const silent = ['no-speech','audio-capture'];
-      onErr && onErr(silent.includes(e.error) ? 'silent' : e.error);
+      const silent = ['no-speech', 'audio-capture'];
+      onErrCb && onErrCb(silent.includes(e.error) ? 'silent' : e.error);
     };
+  };
 
-    // Delay 80ms: necesario tras eventos táctiles en Chrome Android
+  /* Iniciar grabación (push) */
+  const start = (onFinal, onErr) => {
+    onFinalCb = onFinal;
+    onErrCb   = onErr;
+    _create();
+    // Pequeño delay para que el navegador procese el evento táctil antes
     setTimeout(() => {
       try { rec.start(); }
       catch(e) {
-        console.warn('[SR] start() excepción:', e.name, e.message);
+        console.warn('[SR] start() error:', e.name);
         if (e.name === 'InvalidStateError') {
-          setTimeout(() => { try { rec.start(); } catch(_) {} }, 300);
+          setTimeout(() => { try { rec.start(); } catch(_) {} }, 250);
         }
       }
-    }, 80);
+    }, 50);
   };
 
-  const stop  = () => { if (rec && active) { try { rec.stop(); } catch(e) {} } active = false; };
-  const abort = () => { if (rec) { try { rec.abort(); } catch(e) {} } active = false; };
-  const isOn  = () => active;
+  /* Parar grabación (release) — dispara onresult con isFinal */
+  const stop  = () => {
+    if (rec && active) { try { rec.stop(); } catch(e) {} }
+    // active se pone false en onend
+  };
+
+  /* Abortar sin procesar */
+  const abort = () => {
+    if (rec) { try { rec.abort(); } catch(e) {} }
+    active    = false;
+    finalSent = true; // evitar que onend llame onErr
+  };
+
+  const isOn = () => active;
 
   return { start, stop, abort, isOn };
 })();
@@ -436,12 +464,12 @@ const UI = (() => {
     statusLabel.classList.remove('listening');
     switch (mode) {
       case 'idle':
-        statusLabel.textContent = 'Toca para hablar';
+        statusLabel.textContent = 'Mantén pulsado para hablar';
         transcriptEl.textContent = '';
         confirmCard.hidden = true;
         break;
       case 'listening':
-        statusLabel.textContent = 'Escuchando…';
+        statusLabel.textContent = 'Suelta cuando termines…';
         statusLabel.classList.add('listening');
         micBtn.classList.add('listening');
         confirmCard.hidden = true;
@@ -451,7 +479,7 @@ const UI = (() => {
         micBtn.classList.add('processing');
         break;
       case 'confirming':
-        statusLabel.textContent = 'Di "sí" o "no"';
+        statusLabel.textContent = 'Mantén pulsado para responder';
         statusLabel.classList.add('listening');
         micBtn.classList.add('listening');
         break;
@@ -573,49 +601,89 @@ const Panel = (() => {
 })();
 
 /* ══════════════════════════════════════════════════════════
-   APP — Orquestador
+   APP — Orquestador (Push-to-talk)
+
+   FLUJO:
+   · Idle       → mantener pulsado → graba → soltar → procesa
+   · Confirming → mantener pulsado → graba → soltar → evalúa sí/no
+   · Teclado    → Espacio funciona igual (keydown=start, keyup=stop)
 ══════════════════════════════════════════════════════════ */
 const App = (() => {
   let mode    = 'idle';
   let pending = null;
-  let recRef  = null;
+  let phase   = 'event';    // 'event' | 'confirm'
+  let pressing = false;     // está el botón pulsado ahora mismo
 
-  /* ── Helpers de modo ── */
   const setMode = m => { mode = m; UI.setMode(m); };
 
-  /* ── Click en micrófono ── */
-  const onMicClick = () => {
+  /* ════════════════════════════════════════
+     PUSH — inicio de grabación
+  ════════════════════════════════════════ */
+  const onPressStart = e => {
+    e.preventDefault();   // evita scroll en móvil, doble-tap zoom, etc.
+    if (pressing) return; // ignorar si ya está pulsado (multitouch)
+    pressing = true;
+    document.getElementById('micBtn').classList.add('pressed');
+
     if (!SR) {
       UI.toast('Voz no disponible. Usa el campo de texto.', 'err', 5000);
       return;
     }
+
+    // Cancelar síntesis si estaba hablando
     Voice.cancel();
 
-    if (mode === 'confirming') { listenConfirm(); return; }
-    if (mode === 'listening')  { SR.abort(); setMode('idle'); return; }
+    // Determinar fase: ¿estamos esperando confirmación o nuevo evento?
+    phase = (mode === 'confirming') ? 'confirm' : 'event';
 
     setMode('listening');
-    recRef = SR.start(
+
+    SR.start(
+      // onFinal — se llama cuando rec.stop() procesa el audio
       text => {
-        recRef = null;
         UI.transcriptEl.textContent = text;
-        processText(text);
+        if (phase === 'confirm') processConfirm(text);
+        else                     processText(text);
       },
+      // onErr — no habló, error de red, etc.
       err => {
-        recRef = null;
-        console.log('[App] SR err:', err);
+        pressing = false;
         if (err === 'not-allowed') {
           UI.toast('Permiso de micrófono denegado. Actívalo en ajustes del navegador.', 'err', 6000);
+          setMode('idle');
         } else if (err === 'network') {
-          UI.toast('Sin conexión. El reconocimiento de voz requiere internet en Chrome.', 'err', 6000);
+          UI.toast('Sin conexión. El reconocimiento requiere internet en Chrome.', 'err', 6000);
+          setMode('idle');
+        } else if (err === 'no-speech' || err === 'silent') {
+          // No dijo nada — volver al estado anterior sin ruido
+          setMode(phase === 'confirm' ? 'confirming' : 'idle');
+        } else {
+          setMode('idle');
         }
-        // no-speech / silent → volver a idle sin ruido
-        setMode('idle');
       }
     );
   };
 
-  /* ── Procesar texto ── */
+  /* ════════════════════════════════════════
+     RELEASE — fin de grabación → procesar
+  ════════════════════════════════════════ */
+  const onPressEnd = e => {
+    e.preventDefault();
+    if (!pressing) return;
+    pressing = false;
+    document.getElementById('micBtn').classList.remove('pressed');
+
+    if (!SR || !SR.isOn()) return;
+
+    // Pasar a "procesando" visualmente
+    setMode('processing');
+    // Parar la grabación → dispara onresult → onFinal se llama
+    SR.stop();
+  };
+
+  /* ════════════════════════════════════════
+     PROCESAR EVENTO
+  ════════════════════════════════════════ */
   const processText = text => {
     setMode('processing');
     const ev = NLP.parse(text);
@@ -623,33 +691,31 @@ const App = (() => {
     setTimeout(() => {
       UI.showConfirm(ev);
       setMode('confirming');
-      Voice.speak(NLP.toSpeech(ev), () => listenConfirm());
-    }, 300);
-  };
-
-  /* ── Escuchar confirmación ── */
-  const listenConfirm = () => {
-    if (!SR) return;
-    if (recRef) { SR.abort(); recRef = null; }
-    setTimeout(() => {
-      recRef = SR.start(
-        text => {
-          recRef = null;
-          const n = NLP.norm(text);
-          console.log('[App] confirm escuchado:', n);
-          if (CONFIRM_YES.some(w => n.includes(w)))     saveEvent();
-          else if (CONFIRM_NO.some(w => n.includes(w))) cancelEvent();
-          else UI.toast('Di "sí" para guardar o "no" para cancelar', 'inf');
-        },
-        () => { recRef = null; /* timeout silencioso */ }
-      );
+      // Leer la confirmación en voz alta
+      Voice.speak(NLP.toSpeech(ev));
     }, 200);
   };
 
-  /* ── Guardar ── */
+  /* ════════════════════════════════════════
+     PROCESAR CONFIRMACIÓN
+  ════════════════════════════════════════ */
+  const processConfirm = text => {
+    const n = NLP.norm(text);
+    console.log('[App] confirmación:', n);
+    if (CONFIRM_YES.some(w => n.includes(w)))     saveEvent();
+    else if (CONFIRM_NO.some(w => n.includes(w))) cancelEvent();
+    else {
+      UI.toast('No entendí. Pulsa para decir "sí" o "no".', 'inf');
+      setMode('confirming');
+    }
+  };
+
+  /* ════════════════════════════════════════
+     GUARDAR
+  ════════════════════════════════════════ */
   const saveEvent = async () => {
     Voice.cancel();
-    if (recRef) { SR.abort(); recRef = null; }
+    SR.abort();
     if (!pending) { setMode('idle'); return; }
     try {
       await DB.add(pending);
@@ -665,52 +731,70 @@ const App = (() => {
     }
   };
 
-  /* ── Cancelar ── */
+  /* ════════════════════════════════════════
+     CANCELAR
+  ════════════════════════════════════════ */
   const cancelEvent = () => {
     Voice.cancel();
-    if (recRef) { SR.abort(); recRef = null; }
+    SR.abort();
     pending = null;
     setMode('idle');
     Voice.speak('Cancelado.');
     UI.toast('Cancelado', 'inf');
   };
 
-  /* ── Texto fallback ── */
+  /* ════════════════════════════════════════
+     TEXTO FALLBACK
+  ════════════════════════════════════════ */
   const submitText = () => {
     const val = document.getElementById('textInput').value.trim();
     if (!val) return;
     document.getElementById('textInput').value = '';
     UI.transcriptEl.textContent = val;
-    if (mode === 'confirming') {
-      const n = NLP.norm(val);
-      if (CONFIRM_YES.some(w => n.includes(w)))     saveEvent();
-      else if (CONFIRM_NO.some(w => n.includes(w))) cancelEvent();
-      else processText(val);
-    } else {
-      processText(val);
-    }
+    if (mode === 'confirming') processConfirm(val);
+    else                       processText(val);
   };
 
-  /* ── Init ── */
+  /* ════════════════════════════════════════
+     INIT
+  ════════════════════════════════════════ */
   const init = async () => {
     await DB.open();
     Panel.init();
     Notif.request();
 
-    document.getElementById('micBtn').addEventListener('click', onMicClick);
-    document.getElementById('btnSend').addEventListener('click', submitText);
-    document.getElementById('textInput').addEventListener('keydown', e => {
-      if (e.key === 'Enter') { e.preventDefault(); submitText(); }
+    const btn = document.getElementById('micBtn');
+
+    // ── Touch (móvil) ──
+    btn.addEventListener('touchstart', onPressStart, { passive: false });
+    btn.addEventListener('touchend',   onPressEnd,   { passive: false });
+    btn.addEventListener('touchcancel',onPressEnd,   { passive: false });
+
+    // ── Mouse (escritorio) ──
+    btn.addEventListener('mousedown', onPressStart);
+    btn.addEventListener('mouseup',   onPressEnd);
+    btn.addEventListener('mouseleave',e => { if (pressing) onPressEnd(e); });
+
+    // ── Teclado: Espacio (escritorio) ──
+    document.addEventListener('keydown', e => {
+      if (e.code === 'Space' && e.target === document.body && !e.repeat) {
+        onPressStart(e);
+      }
     });
+    document.addEventListener('keyup', e => {
+      if (e.code === 'Space' && e.target === document.body) {
+        onPressEnd(e);
+      }
+    });
+
+    // ── Botones de confirmación manual ──
     document.getElementById('btnYes').addEventListener('click', saveEvent);
     document.getElementById('btnNo').addEventListener('click',  cancelEvent);
 
-    // Espacio como atajo de teclado (escritorio)
-    document.addEventListener('keydown', e => {
-      if (e.code === 'Space' && e.target === document.body) {
-        e.preventDefault();
-        onMicClick();
-      }
+    // ── Texto fallback ──
+    document.getElementById('btnSend').addEventListener('click', submitText);
+    document.getElementById('textInput').addEventListener('keydown', e => {
+      if (e.key === 'Enter') { e.preventDefault(); submitText(); }
     });
 
     // Cargar voces en background
@@ -723,7 +807,7 @@ const App = (() => {
       document.getElementById('statusLabel').textContent = 'Escribe tu evento abajo';
     }
 
-    console.log('[App] listo ✓');
+    console.log('[App] listo ✓ (push-to-talk)');
   };
 
   return { init, saveEvent, cancelEvent };
