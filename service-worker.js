@@ -1,5 +1,5 @@
 /* Al Grano — service-worker.js */
-const CACHE = 'algrano-v12';
+const CACHE = 'algrano-v13';
 
 const ASSETS = [
   './',
