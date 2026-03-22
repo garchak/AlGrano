@@ -251,11 +251,16 @@ const SR = (() => {
   if (!Cls) { console.warn('[SR] API no disponible'); return null; }
 
   let rec        = null;
+  let _stream    = null;   // stream getUserMedia — se cierra en onend/abort
   let transcript = '';
   let active     = false;
   let stopping   = false;
   let cbFinal    = null;
   let cbErr      = null;
+
+  const _closeStream = () => {
+    if (_stream) { _stream.getTracks().forEach(t => t.stop()); _stream = null; }
+  };
 
   /* ── Crear e iniciar la instancia de reconocimiento ── */
   const _startRec = () => {
@@ -285,6 +290,7 @@ const SR = (() => {
     rec.onend = () => {
       console.log('[SR] onend — stopping:', stopping, '— transcript:', transcript);
       active = false;
+      _closeStream();   // ahora sí, SR terminó, liberamos el stream
       if (stopping) {
         if (transcript) cbFinal?.(transcript);
         else            cbErr?.('no-speech');
@@ -307,21 +313,22 @@ const SR = (() => {
     }
   };
 
-  /* ── start(): pedir permiso de micrófono primero ── */
+  /* ── start(): pedir permiso con getUserMedia, luego SR con stream ABIERTO ── */
   const start = (onFinal, onErr) => {
     cbFinal = onFinal;
     cbErr   = onErr;
     active  = false;
 
-    // PASO 1: pedir permiso explícito con getUserMedia
-    // Esto es lo que dispara el popup de permiso en todos los navegadores
     navigator.mediaDevices.getUserMedia({ audio: true })
       .then(stream => {
-        // Permiso concedido — cerrar el stream inmediatamente
-        // (solo lo necesitábamos para el permiso)
-        stream.getTracks().forEach(t => t.stop());
-        console.log('[SR] permiso concedido, iniciando reconocimiento…');
-        // PASO 2: ahora sí iniciar SpeechRecognition
+        // CLAVE: NO cerrar el stream antes de iniciar SR.
+        // En Chrome Android, cerrar el stream hace que SR devuelva not-allowed.
+        // Lo cerramos dentro de onend, cuando SR ya terminó.
+        console.log('[SR] permiso concedido, iniciando SR con stream vivo…');
+
+        // Guardar referencia para cerrar después
+        _stream = stream;
+
         _startRec();
       })
       .catch(err => {
@@ -349,6 +356,7 @@ const SR = (() => {
   const abort = () => {
     stopping = false;
     if (rec) { try { rec.abort(); } catch(_){} rec = null; }
+    _closeStream();
     active = false;
   };
 
