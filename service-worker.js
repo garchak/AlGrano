@@ -1,7 +1,7 @@
 /* Al Grano — service-worker.js v3 */
 
 // Cambiar este número cada vez que se despliega una nueva versión
-const CACHE = 'algrano-v9';
+const CACHE = 'algrano-v10';
 
 const ASSETS = [
   './',

@@ -368,6 +368,8 @@ body {
 }
 .btn-yes { background: var(--amber-glow); border: 1px solid var(--amber-dim); color: var(--amber); }
 .btn-yes:hover { background: rgba(232,168,48,.22); border-color: var(--amber); }
+.btn-yes.btn-danger { background: rgba(192,57,43,.12); border-color: rgba(192,57,43,.4); color: #e57070; }
+.btn-yes.btn-danger:hover { background: rgba(192,57,43,.22); border-color: var(--danger); }
 .btn-no  { background: transparent; border: 1px solid var(--faint); color: var(--muted); }
 .btn-no:hover  { border-color: var(--danger); color: var(--danger); }
 
@@ -531,6 +533,30 @@ body {
 .mic-btn.pressed .ring:nth-child(1) { animation: ripple 1.2s ease-out infinite 0.0s; }
 .mic-btn.pressed .ring:nth-child(2) { animation: ripple 1.2s ease-out infinite 0.4s; }
 .mic-btn.pressed .ring:nth-child(3) { animation: ripple 1.2s ease-out infinite 0.8s; }
+
+
+/* ── Badges de acción en confirmación ────── */
+.confirm-action-tag {
+  display: inline-block;
+  font-family: var(--mono);
+  font-size: 9px;
+  letter-spacing: .18em;
+  text-transform: uppercase;
+  padding: 3px 8px;
+  border-radius: 4px;
+  margin-bottom: 10px;
+  font-style: normal;
+}
+.confirm-action-tag.delete {
+  background: rgba(192,57,43,.15);
+  color: #e57070;
+  border: 1px solid rgba(192,57,43,.3);
+}
+.confirm-action-tag.update {
+  background: rgba(52,152,219,.12);
+  color: #5daee5;
+  border: 1px solid rgba(52,152,219,.25);
+}
 
 /* ── MISC ───────────────────────────────── */
 @media (prefers-reduced-motion: reduce) {

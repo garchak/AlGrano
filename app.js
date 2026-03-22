@@ -43,7 +43,8 @@ const DB = (() => {
   const add    = async ev  => { const d = await open(); return new Promise((ok,fail) => { const t = d.transaction('eventos','readwrite'); t.objectStore('eventos').add(ev).onsuccess = ok; t.onerror = fail; }); };
   const getAll = async ()  => { const d = await open(); return new Promise((ok,fail) => { const r = d.transaction('eventos','readonly').objectStore('eventos').getAll(); r.onsuccess = () => ok(r.result); r.onerror = fail; }); };
   const del    = async id  => { const d = await open(); return new Promise((ok,fail) => { const t = d.transaction('eventos','readwrite'); t.objectStore('eventos').delete(id).onsuccess = ok; t.onerror = fail; }); };
-  return { open, add, getAll, del };
+  const update = async ev  => { const d = await open(); return new Promise((ok,fail) => { const t = d.transaction('eventos','readwrite'); t.objectStore('eventos').put(ev).onsuccess = ok; t.onerror = fail; }); };
+  return { open, add, getAll, del, update };
 })();
 
 /* ============================================================
@@ -199,7 +200,73 @@ const NLP = (() => {
   };
 
   const ad = (d,n) => { const r=new Date(d); r.setDate(r.getDate()+n); return r; };
-  return { parse, humanDate, toSpeech, norm:n };
+
+  /* ── Detectar intención: nuevo / eliminar / modificar ── */
+  const detectIntent = text => {
+    const s = n(text);
+    const deleteWords = /\b(elimina|borra|quita|cancela|suprime|eliminar|borrar|quitar|cancelar)\b/;
+    const updateWords = /\b(cambia|mueve|modifica|retrasa|adelanta|pasa|pon|actualiza|cambia|cambiar|mover|modificar|poner)\b/;
+    if (deleteWords.test(s)) return 'delete';
+    if (updateWords.test(s)) return 'update';
+    return 'create';
+  };
+
+  /* ── Extraer término de búsqueda del evento referenciado ── */
+  const extractSearchTerm = text => {
+    let s = n(text);
+    // Quitar verbos de intención + artículo al inicio
+    s = s.replace(/^(elimina(r)?|borra(r)?|quita(r)?|cancela(r)?|suprime|cambia(r)?|mueve|mover|modifica(r)?|retrasa(r)?|adelanta(r)?|pasa(r)?|pon|poner|actualiza(r)?)\s+(el|la|los|las|un|una)?\s*/i, '');
+    // Quitar cola temporal: "a las X", "al lunes", "para mañana", "el martes", etc.
+    s = s.replace(/\s+(a las?|al?|para (el|la)?|del?|de la|por la|esta|hoy|manana|ma[ñn]ana|pasado|el pr[oó]ximo|lunes|martes|mi[eé]rcoles|jueves|viernes|s[aá]bado|domingo)\b.*/i, '');
+    // Limpiar artículos/preposiciones sueltos al final
+    s = s.replace(/\s+(el|la|los|las|un|una|de|del|al|a)$/i, '').trim();
+    return s;
+  };
+
+  /* ── Buscar evento por similitud de título ── */
+  const findEvent = (term, events) => {
+    if (!term || !events.length) return null;
+    const t = n(term);
+
+    // 1. Coincidencia exacta de título
+    let match = events.find(e => n(e.title) === t);
+    if (match) return match;
+
+    // 2. El título contiene el término completo
+    match = events.find(e => n(e.title).includes(t));
+    if (match) return match;
+
+    // 3. El término contiene el título completo
+    match = events.find(e => t.includes(n(e.title)));
+    if (match) return match;
+
+    // 4. Palabras clave significativas (>2 chars) con peso
+    const words = t.split(/\s+/).filter(w => w.length > 2);
+    if (words.length) {
+      // Contar cuántas palabras coinciden por evento
+      const scored = events.map(e => {
+        const et = n(e.title);
+        const hits = words.filter(w => et.includes(w)).length;
+        return { e, hits };
+      }).filter(x => x.hits > 0)
+        .sort((a,b) => b.hits - a.hits);
+      if (scored.length) return scored[0].e;
+    }
+    return null;
+  };
+
+  /* ── Extraer cambios a aplicar (fecha y/u hora nueva) ── */
+  const extractChanges = text => {
+    const s    = n(text);
+    const fecha = parseDate(s);
+    const hora  = parseTime(s);
+    const changes = {};
+    if (fecha) changes.date  = fecha.toISOString().split('T')[0];
+    if (hora)  { changes.time = hora.time; changes.block = hora.block; }
+    return changes;
+  };
+
+  return { parse, humanDate, toSpeech, norm:n, detectIntent, extractSearchTerm, findEvent, extractChanges };
 })();
 
 /* ============================================================
@@ -476,9 +543,35 @@ const UI = (() => {
       ? `<br><small>🔔 ${ev.reminders.map(r=>r>=60?`${r/60}h`:`${r}min`).join(', ')} antes</small>` : '';
     const rep = ev.repeat ? `<br><small>🔁 ${ev.repeat}</small>` : '';
     $('confirmPreview').innerHTML = `<strong>${ev.title}</strong><br>${date} ${time}${rem}${rep}`;
+    $('confirmCard').hidden = false;
   };
 
-  return { toast, setMode, showConfirm };
+  const showDelete = ev => {
+    $('confirmPreview').innerHTML =
+      `<span class="confirm-action-tag delete">Eliminar</span><strong>${ev.title}</strong><br>${NLP.humanDate(ev.date)}${ev.time ? ' · ' + ev.time : ''}`;
+    $('btnYes').textContent = '✓ Sí, eliminar';
+    $('btnNo').textContent  = '✗ Cancelar';
+    $('confirmCard').hidden = false;
+  };
+
+  const showUpdate = (ev, changes) => {
+    const parts = [];
+    if (changes.date) parts.push(NLP.humanDate(changes.date));
+    if (changes.time) parts.push(changes.time);
+    else if (changes.block) parts.push(`por la ${changes.block}`);
+    $('confirmPreview').innerHTML =
+      `<span class="confirm-action-tag update">Modificar</span><strong>${ev.title}</strong><br>${parts.join(' · ')}`;
+    $('btnYes').textContent = '✓ Sí, cambiar';
+    $('btnNo').textContent  = '✗ Cancelar';
+    $('confirmCard').hidden = false;
+  };
+
+  const resetConfirmBtns = () => {
+    $('btnYes').textContent = '✓ Guardar';
+    $('btnNo').textContent  = '✗ Cancelar';
+  };
+
+  return { toast, setMode, showConfirm, showDelete, showUpdate, resetConfirmBtns };
 })();
 
 /* ============================================================
@@ -683,8 +776,10 @@ const Upcoming = (() => {
 const App = (() => {
   let mode     = 'idle';
   let pending  = null;
-  let phase    = 'event';   // 'event' | 'confirm'
+  let phase    = 'event';   // 'event' | 'confirm' | 'delete' | 'update'
   let pressing = false;
+  let targetEv = null;      // evento sobre el que se opera (delete/update)
+  let pendingChanges = null; // cambios a aplicar en update
 
   const setMode = m => { mode = m; UI.setMode(m); };
 
@@ -697,7 +792,7 @@ const App = (() => {
     if (!SR) { UI.toast('Reconocimiento de voz no disponible','err',5000); return; }
 
     Voice.cancel();
-    phase = (mode === 'confirming') ? 'confirm' : 'event';
+    phase = (mode === 'confirming') ? phase : 'event';
     setMode('listening');
 
     SR.start(
@@ -735,24 +830,129 @@ const App = (() => {
     }
   };
 
-  /* ── Procesar frase del evento ── */
-  const processEvent = text => {
+  /* ── Procesar frase: detectar si es nuevo, eliminar o modificar ── */
+  const processEvent = async text => {
     setMode('processing');
-    pending = NLP.parse(text);
-    setTimeout(() => {
-      UI.showConfirm(pending);
-      setMode('confirming');
-      Voice.speak(NLP.toSpeech(pending));
-    }, 150);
+    const intent = NLP.detectIntent(text);
+    console.log('[App] intent:', intent, '| text:', text);
+
+    if (intent === 'delete') {
+      await processDelete(text);
+    } else if (intent === 'update') {
+      await processUpdate(text);
+    } else {
+      // Nuevo evento
+      pending = NLP.parse(text);
+      UI.resetConfirmBtns();
+      setTimeout(() => {
+        UI.showConfirm(pending);
+        setMode('confirming');
+        Voice.speak(NLP.toSpeech(pending));
+      }, 150);
+    }
   };
 
-  /* ── Procesar confirmación ── */
+  /* ── Procesar eliminación ── */
+  const processDelete = async text => {
+    const all  = await DB.getAll();
+    const term = NLP.extractSearchTerm(text);
+    const ev   = NLP.findEvent(term, all);
+    if (!ev) {
+      UI.toast(`No encontré ningún evento con "${term}"`, 'err', 4000);
+      Voice.speak(`No encontré ningún evento con ese nombre.`);
+      setMode('idle');
+      return;
+    }
+    targetEv = ev;
+    phase    = 'delete';
+    UI.showDelete(ev);
+    setMode('confirming');
+    Voice.speak(`¿Elimino ${ev.title}?`);
+  };
+
+  /* ── Procesar modificación ── */
+  const processUpdate = async text => {
+    const all     = await DB.getAll();
+    const term    = NLP.extractSearchTerm(text);
+    const ev      = NLP.findEvent(term, all);
+    const changes = NLP.extractChanges(text);
+
+    if (!ev) {
+      UI.toast(`No encontré ningún evento con "${term}"`, 'err', 4000);
+      Voice.speak(`No encontré ningún evento con ese nombre.`);
+      setMode('idle');
+      return;
+    }
+    if (!changes.date && !changes.time && !changes.block) {
+      UI.toast('No entendí qué cambiar. Dime la nueva fecha u hora.', 'err', 4000);
+      Voice.speak('No entendí qué cambiar. Dime la nueva fecha u hora.');
+      setMode('idle');
+      return;
+    }
+    targetEv       = ev;
+    pendingChanges = changes;
+    phase          = 'update';
+    UI.showUpdate(ev, changes);
+    setMode('confirming');
+    const partes = [];
+    if (changes.date) partes.push(NLP.humanDate(changes.date));
+    if (changes.time) partes.push(`a las ${changes.time}`);
+    else if (changes.block) partes.push(`por la ${changes.block}`);
+    Voice.speak(`¿Cambio ${ev.title} a ${partes.join(' ')}?`);
+  };
+
+  /* ── Procesar confirmación (nuevo / delete / update) ── */
   const processConfirm = text => {
     const s = NLP.norm(text);
-    console.log('[App] confirm:', s);
-    if      (CONFIRM_YES.some(w=>s.includes(w))) saveEvent();
-    else if (CONFIRM_NO.some(w=>s.includes(w)))  cancelEvent();
-    else { UI.toast('Di "sí" para guardar o "no" para cancelar','inf'); setMode('confirming'); }
+    console.log('[App] confirm phase=' + phase + ':', s);
+    if (CONFIRM_YES.some(w=>s.includes(w))) {
+      if      (phase === 'delete') deleteEvent();
+      else if (phase === 'update') updateEvent();
+      else                         saveEvent();
+    } else if (CONFIRM_NO.some(w=>s.includes(w))) {
+      cancelEvent();
+    } else {
+      UI.toast('Di "sí" o "no"', 'inf');
+      setMode('confirming');
+    }
+  };
+
+  /* ── Eliminar evento confirmado ── */
+  const deleteEvent = async () => {
+    Voice.cancel(); SR?.abort();
+    if (!targetEv) { setMode('idle'); return; }
+    try {
+      await DB.del(targetEv.id);
+      UI.toast(`${targetEv.title} eliminado`, 'ok');
+      Voice.speak(`${targetEv.title} eliminado.`);
+      targetEv = null; phase = 'event';
+      UI.resetConfirmBtns();
+      Upcoming.render();
+      Panel.render();
+      setMode('idle');
+    } catch(e) { console.error(e); UI.toast('Error al eliminar','err'); setMode('idle'); }
+  };
+
+  /* ── Actualizar evento confirmado ── */
+  const updateEvent = async () => {
+    Voice.cancel(); SR?.abort();
+    if (!targetEv || !pendingChanges) { setMode('idle'); return; }
+    try {
+      const updated = { ...targetEv, ...pendingChanges };
+      // Si cambia fecha u hora, recalcular status
+      if (pendingChanges.date || pendingChanges.time) updated.status = 'scheduled';
+      await DB.update(updated);
+      const partes = [];
+      if (pendingChanges.date) partes.push(NLP.humanDate(pendingChanges.date));
+      if (pendingChanges.time) partes.push(pendingChanges.time);
+      UI.toast(`${updated.title} actualizado`, 'ok');
+      Voice.speak(`${updated.title} actualizado.`);
+      targetEv = null; pendingChanges = null; phase = 'event';
+      UI.resetConfirmBtns();
+      Upcoming.render();
+      Panel.render();
+      setMode('idle');
+    } catch(e) { console.error(e); UI.toast('Error al actualizar','err'); setMode('idle'); }
   };
 
   /* ── Guardar ── */
@@ -773,7 +973,9 @@ const App = (() => {
   /* ── Cancelar ── */
   const cancelEvent = () => {
     Voice.cancel(); SR?.abort();
-    pending = null; pressing = false;
+    pending = null; targetEv = null; pendingChanges = null;
+    pressing = false; phase = 'event';
+    UI.resetConfirmBtns();
     setMode('idle');
     Voice.speak('Cancelado.');
     UI.toast('Cancelado','inf');
@@ -819,7 +1021,11 @@ const App = (() => {
     });
 
     // Botones confirmación manual
-    document.getElementById('btnYes').addEventListener('click', saveEvent);
+    document.getElementById('btnYes').addEventListener('click', () => {
+      if      (phase === 'delete') deleteEvent();
+      else if (phase === 'update') updateEvent();
+      else                         saveEvent();
+    });
     document.getElementById('btnNo').addEventListener('click',  cancelEvent);
 
     // Input texto
