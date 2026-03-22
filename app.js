@@ -313,34 +313,46 @@ const SR = (() => {
     }
   };
 
-  /* ── start(): pedir permiso con getUserMedia, luego SR con stream ABIERTO ── */
+  /* ── Detectar si estamos en Android Chrome ── */
+  const isAndroidChrome = () => {
+    const ua = navigator.userAgent;
+    return /Android/.test(ua) && /Chrome/.test(ua) && !/EdgA|OPR/.test(ua);
+  };
+
+  /* ── start():
+     - Android Chrome → SpeechRecognition directamente (getUserMedia lo bloquea)
+     - Resto (Safari Mac, Chrome Mac…) → getUserMedia primero para disparar el popup
+  ── */
   const start = (onFinal, onErr) => {
     cbFinal = onFinal;
     cbErr   = onErr;
     active  = false;
 
-    navigator.mediaDevices.getUserMedia({ audio: true })
-      .then(stream => {
-        // CLAVE: NO cerrar el stream antes de iniciar SR.
-        // En Chrome Android, cerrar el stream hace que SR devuelva not-allowed.
-        // Lo cerramos dentro de onend, cuando SR ya terminó.
-        console.log('[SR] permiso concedido, iniciando SR con stream vivo…');
-
-        // Guardar referencia para cerrar después
-        _stream = stream;
-
-        _startRec();
-      })
-      .catch(err => {
-        console.error('[SR] getUserMedia rechazado:', err.name, err.message);
-        if (err.name === 'NotAllowedError' || err.name === 'PermissionDeniedError') {
-          cbErr?.('not-allowed');
-        } else if (err.name === 'NotFoundError') {
-          cbErr?.('no-mic');
-        } else {
-          cbErr?.(err.name);
-        }
-      });
+    if (isAndroidChrome()) {
+      // Android Chrome: SpeechRecognition gestiona su propio permiso vía Android OS.
+      // Llamar getUserMedia ANTES bloquea el audio — no lo hacemos.
+      console.log('[SR] Android Chrome detectado → SR directo sin getUserMedia');
+      _startRec();
+    } else {
+      // Desktop Chrome, Safari, Edge: getUserMedia dispara el popup de permiso
+      // y luego SR arranca con el stream activo.
+      navigator.mediaDevices.getUserMedia({ audio: true })
+        .then(stream => {
+          _stream = stream;
+          console.log('[SR] permiso getUserMedia concedido → iniciando SR');
+          _startRec();
+        })
+        .catch(err => {
+          console.error('[SR] getUserMedia rechazado:', err.name, err.message);
+          if (err.name === 'NotAllowedError' || err.name === 'PermissionDeniedError') {
+            cbErr?.('not-allowed');
+          } else if (err.name === 'NotFoundError') {
+            cbErr?.('no-mic');
+          } else {
+            cbErr?.(err.name);
+          }
+        });
+    }
   };
 
   const stop = () => {
