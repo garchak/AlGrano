@@ -1,7 +1,7 @@
 /* Al Grano — service-worker.js v3 */
 
 // Cambiar este número cada vez que se despliega una nueva versión
-const CACHE = 'algrano-v10';
+const CACHE = 'algrano-v11';
 
 const ASSETS = [
   './',
@@ -73,4 +73,47 @@ self.addEventListener('fetch', e => {
       }).catch(() => new Response('offline', { status: 503 }));
     })
   );
+});
+
+/* ── Notificaciones push desde el SW ───────────────────────
+   Cuando la app está cerrada, el SW puede mostrar notificaciones
+   usando showNotification() que sí soporta vibración y badge
+── */
+self.addEventListener('notificationclick', e => {
+  e.notification.close();
+  // Abrir la app al pulsar la notificación
+  e.waitUntil(
+    clients.matchAll({ type: 'window', includeUncontrolled: true }).then(list => {
+      // Si ya hay una pestaña abierta, enfocarla
+      const existing = list.find(c => c.url.includes(self.location.origin));
+      if (existing) return existing.focus();
+      // Si no, abrir una nueva
+      return clients.openWindow('./');
+    })
+  );
+});
+
+/* ── Sync periódico: revisar alarmas al despertar el SW ──── */
+self.addEventListener('sync', e => {
+  if (e.tag === 'check-alarms') {
+    console.log('[SW] sync check-alarms');
+  }
+});
+
+/* ── Mensajes desde la app ─────────────────────────────── */
+self.addEventListener('message', e => {
+  // La app puede pedir al SW que muestre una notificación
+  // (útil cuando la app está en background en iOS)
+  if (e.data?.type === 'SHOW_NOTIFICATION') {
+    const { title, body, tag } = e.data;
+    self.registration.showNotification(title, {
+      body,
+      icon:    './icons/icon-192.png',
+      badge:   './icons/icon-192.png',
+      tag,
+      renotify: true,
+      vibrate: [200, 100, 200, 100, 200],
+    });
+  }
+  if (e.data === 'skipWaiting') self.skipWaiting();
 });

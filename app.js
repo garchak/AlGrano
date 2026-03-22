@@ -88,11 +88,28 @@ const NLP = (() => {
         return { time:`${String(h).padStart(2,'0')}:${m}`, block:null };
       }
     }
-    const mh = /\b(?:a las?|las?)?\s*(\d{1,2})(?::(\d{2}))?\b/.exec(s);
-    if (mh) {
-      let h=parseInt(mh[1]), m=mh[2]?parseInt(mh[2]):0;
-      if(h>=1&&h<8)h+=12;
+    // Patrón 1: "a las 22:45" o "las 9:30"
+    const mhColon = /\b(?:a las?|las?)\s*(\d{1,2}):(\d{2})\b/.exec(s);
+    if (mhColon) {
+      let h=parseInt(mhColon[1]), m=parseInt(mhColon[2]);
+      if(h>=1&&h<8&&!s.includes('manana'))h+=12;
       if(h<24&&m<60) return { time:`${String(h).padStart(2,'0')}:${String(m).padStart(2,'0')}`, block:null };
+    }
+    // Patrón 2: "a las 22 45" — hora y minutos separados por espacio
+    // Solo si el número de minutos es 00-59 y tiene 1-2 dígitos
+    const mhSpace = /\b(?:a las?|las?)\s*(\d{1,2})\s+(\d{1,2})\b/.exec(s);
+    if (mhSpace) {
+      const h2 = parseInt(mhSpace[1]), m2 = parseInt(mhSpace[2]);
+      if (h2>=0 && h2<24 && m2>=0 && m2<60) {
+        return { time:`${String(h2).padStart(2,'0')}:${String(m2).padStart(2,'0')}`, block:null };
+      }
+    }
+    // Patrón 3: número suelto — "a las 22" / "las 9"
+    const mhSolo = /\b(?:a las?|las?)\s*(\d{1,2})\b/.exec(s);
+    if (mhSolo) {
+      let h=parseInt(mhSolo[1]);
+      if(h>=1&&h<8&&!s.includes('manana'))h+=12;
+      if(h<24) return { time:`${String(h).padStart(2,'0')}:00`, block:null };
     }
     for (const [b,t] of Object.entries(TIME_BLOCKS)) { if(s.includes(b)) return {time:t,block:b}; }
     return null;
@@ -476,18 +493,190 @@ const SR = (() => {
 /* ============================================================
    NOTIFICACIONES
    ============================================================ */
+/* ============================================================
+   ALARMAS — sonido + notificación del sistema + banner in-app
+   · AudioContext genera el sonido en el navegador (sin archivos)
+   · Notification API muestra aviso del sistema (app en background)
+   · Banner propio como fallback y refuerzo visual
+   · Al reabrir la app se recargan todas las alarmas pendientes
+   ============================================================ */
 const Notif = (() => {
-  const req = () => { if('Notification'in window && Notification.permission==='default') Notification.requestPermission(); };
+
+  // ── Timers activos: { id: timeoutId } ──────────────────────
+  const timers = {};
+
+  // ── Pedir permisos ──────────────────────────────────────────
+  const req = async () => {
+    if (!('Notification' in window)) return;
+    if (Notification.permission === 'default') {
+      await Notification.requestPermission();
+    }
+  };
+
+  // ── Sonido de alarma con AudioContext ───────────────────────
+  // Genera un tono sin ficheros externos — funciona offline
+  const playAlarm = () => {
+    try {
+      const ctx  = new (window.AudioContext || window.webkitAudioContext)();
+      const play = (freq, start, dur) => {
+        const osc  = ctx.createOscillator();
+        const gain = ctx.createGain();
+        osc.connect(gain);
+        gain.connect(ctx.destination);
+        osc.type      = 'sine';
+        osc.frequency.setValueAtTime(freq, ctx.currentTime + start);
+        gain.gain.setValueAtTime(0.5, ctx.currentTime + start);
+        gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + start + dur);
+        osc.start(ctx.currentTime + start);
+        osc.stop(ctx.currentTime + start + dur + 0.05);
+      };
+      // Tres tonos ascendentes: bip-bip-bip
+      play(880, 0.0, 0.18);
+      play(988, 0.22, 0.18);
+      play(1109, 0.44, 0.35);
+      // Repetir una vez más
+      play(880, 0.9, 0.18);
+      play(988, 1.12, 0.18);
+      play(1109, 1.34, 0.35);
+    } catch(e) {
+      console.warn('[Alarm] AudioContext error:', e);
+    }
+  };
+
+  // ── Banner in-app ───────────────────────────────────────────
+  const showBanner = (title, body) => {
+    // Crear banner si no existe
+    let el = document.getElementById('alarmBanner');
+    if (!el) {
+      el = document.createElement('div');
+      el.id = 'alarmBanner';
+      el.className = 'alarm-banner';
+      document.body.appendChild(el);
+    }
+    el.innerHTML = `
+      <div class="ab-icon">⏰</div>
+      <div class="ab-text">
+        <strong>${title}</strong>
+        <span>${body}</span>
+      </div>
+      <button class="ab-close" onclick="this.parentElement.classList.remove('visible')">✕</button>
+    `;
+    // Mostrar con animación
+    requestAnimationFrame(() => {
+      el.classList.add('visible');
+    });
+    // Auto-ocultar tras 8 segundos
+    setTimeout(() => el.classList.remove('visible'), 8000);
+  };
+
+  // ── Disparar alarma ─────────────────────────────────────────
+  const fire = (ev, minsBefore) => {
+    console.log('[Alarm] 🔔', ev.title, `(${minsBefore} min antes)`);
+
+    const body = minsBefore === 0
+      ? `¡Ahora!`
+      : minsBefore < 60
+        ? `En ${minsBefore} minuto${minsBefore > 1 ? 's' : ''}`
+        : `En ${minsBefore / 60} hora${minsBefore > 60 ? 's' : ''}`;
+
+    const notifTitle = `⏰ ${ev.title}`;
+    const notifOpts  = {
+      body,
+      icon:     './icons/icon-192.png',
+      badge:    './icons/icon-192.png',
+      tag:      `alarm-${ev.id}-${minsBefore}`,
+      renotify: true,
+      vibrate:  [200, 100, 200, 100, 200],
+    };
+
+    // 1. Sonido (siempre, si app abierta)
+    playAlarm();
+
+    // 2a. Notificación via Service Worker (más fiable, funciona en background)
+    if (navigator.serviceWorker?.controller) {
+      navigator.serviceWorker.controller.postMessage({
+        type: 'SHOW_NOTIFICATION',
+        title: notifTitle,
+        body,
+        tag: notifOpts.tag,
+      });
+    }
+    // 2b. Fallback: Notification API directa
+    else if ('Notification' in window && Notification.permission === 'granted') {
+      try { new Notification(notifTitle, notifOpts); }
+      catch(e) { console.warn('[Alarm] Notification error:', e); }
+    }
+
+    // 3. Banner in-app (siempre visible si la app está en pantalla)
+    showBanner(ev.title, body);
+  };
+
+  // ── Programar alarmas de un evento ─────────────────────────
   const sch = ev => {
-    if(!ev.time||!ev.reminders.length) return;
-    if(!('Notification'in window)||Notification.permission!=='granted') return;
-    const d = new Date(`${ev.date}T${ev.time}:00`);
-    ev.reminders.forEach(m => {
-      const delay = d.getTime() - m*60000 - Date.now();
-      if(delay>0&&delay<86400000) setTimeout(()=>new Notification(`⏰ ${ev.title}`,{body:`En ${m} minutos`,icon:'./icons/icon-192.png'}), delay);
+    if (!ev.time) return;
+    if (!ev.reminders || ev.reminders.length === 0) return;
+
+    const evDate = new Date(`${ev.date}T${ev.time}:00`);
+    const now    = Date.now();
+
+    ev.reminders.forEach(mins => {
+      const fireAt = evDate.getTime() - mins * 60000;
+      const delay  = fireAt - now;
+      const key    = `${ev.id}-${mins}`;
+
+      // Cancelar timer anterior si ya existía
+      if (timers[key]) clearTimeout(timers[key]);
+
+      if (delay > 0 && delay < 7 * 24 * 60 * 60 * 1000) { // máx 7 días
+        timers[key] = setTimeout(() => {
+          fire(ev, mins);
+          delete timers[key];
+        }, delay);
+        console.log(`[Alarm] programado: ${ev.title} en ${Math.round(delay/60000)} min`);
+      }
+    });
+
+    // Alarma justo en el momento del evento (si no hay reminder de 0)
+    const delayNow = evDate.getTime() - now;
+    const keyNow   = `${ev.id}-0`;
+    if (delayNow > 0 && delayNow < 7 * 24 * 60 * 60 * 1000) {
+      if (timers[keyNow]) clearTimeout(timers[keyNow]);
+      timers[keyNow] = setTimeout(() => {
+        fire(ev, 0);
+        delete timers[keyNow];
+      }, delayNow);
+    }
+  };
+
+  // ── Cancelar alarmas de un evento ──────────────────────────
+  const cancel = evId => {
+    Object.keys(timers).forEach(key => {
+      if (key.startsWith(evId)) {
+        clearTimeout(timers[key]);
+        delete timers[key];
+      }
     });
   };
-  return { req, sch };
+
+  // ── Recargar TODAS las alarmas al abrir la app ──────────────
+  // Necesario porque setTimeout no persiste entre sesiones
+  const reload = async () => {
+    try {
+      const all = await DB.getAll();
+      let count = 0;
+      all.forEach(ev => {
+        if (ev.status === 'scheduled' && ev.time && ev.reminders?.length) {
+          sch(ev);
+          count++;
+        }
+      });
+      if (count) console.log(`[Alarm] ${count} eventos con alarmas recargados`);
+    } catch(e) {
+      console.warn('[Alarm] Error al recargar:', e);
+    }
+  };
+
+  return { req, sch, cancel, reload, playAlarm };
 })();
 
 /* ============================================================
@@ -922,6 +1111,7 @@ const App = (() => {
     Voice.cancel(); SR?.abort();
     if (!targetEv) { setMode('idle'); return; }
     try {
+      Notif.cancel(targetEv.id);   // cancelar timers de alarma
       await DB.del(targetEv.id);
       UI.toast(`${targetEv.title} eliminado`, 'ok');
       Voice.speak(`${targetEv.title} eliminado.`);
@@ -939,9 +1129,10 @@ const App = (() => {
     if (!targetEv || !pendingChanges) { setMode('idle'); return; }
     try {
       const updated = { ...targetEv, ...pendingChanges };
-      // Si cambia fecha u hora, recalcular status
       if (pendingChanges.date || pendingChanges.time) updated.status = 'scheduled';
+      Notif.cancel(targetEv.id);   // cancelar alarmas anteriores
       await DB.update(updated);
+      Notif.sch(updated);          // reprogramar con nueva fecha/hora
       const partes = [];
       if (pendingChanges.date) partes.push(NLP.humanDate(pendingChanges.date));
       if (pendingChanges.time) partes.push(pendingChanges.time);
@@ -997,6 +1188,7 @@ const App = (() => {
     Panel.init();
     VoiceSettings.init();
     Upcoming.render();
+    await Notif.reload();   // recargar alarmas pendientes al abrir la app
     Notif.req();
 
     const btn = document.getElementById('micBtn');
