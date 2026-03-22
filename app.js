@@ -732,6 +732,11 @@ const UI = (() => {
       ? `<br><small>🔔 ${ev.reminders.map(r=>r>=60?`${r/60}h`:`${r}min`).join(', ')} antes</small>` : '';
     const rep = ev.repeat ? `<br><small>🔁 ${ev.repeat}</small>` : '';
     $('confirmPreview').innerHTML = `<strong>${ev.title}</strong><br>${date} ${time}${rem}${rep}`;
+
+    // Guardar evento en el botón de GCal para acceder desde el listener
+    const btnGcal = $('btnGcal');
+    if (btnGcal) btnGcal.dataset.ev = JSON.stringify(ev);
+
     $('confirmCard').hidden = false;
   };
 
@@ -959,6 +964,197 @@ const Upcoming = (() => {
   return { render };
 })();
 
+
+/* ============================================================
+   GOOGLE CALENDAR — generador de enlace "Add to Calendar"
+   Formato: https://calendar.google.com/calendar/render?action=TEMPLATE&...
+   No requiere API key ni OAuth — abre el formulario de GCal
+   con todos los campos ya rellenos.
+   ============================================================ */
+const GCal = (() => {
+
+  /* Convertir fecha + hora del evento al formato que pide GCal:
+     YYYYMMDDTHHMMSS para eventos con hora
+     YYYYMMDD        para eventos sin hora (todo el día)  */
+  const toGCalDate = (isoDate, time) => {
+    const d = isoDate.replace(/-/g, '');   // "2025-03-22" → "20250322"
+    if (!time) return d;
+    const t = time.replace(':', '') + '00'; // "09:30" → "093000"
+    return `${d}T${t}`;
+  };
+
+  /* Construir URL completa para Google Calendar */
+  const buildUrl = ev => {
+    const start = toGCalDate(ev.date, ev.time);
+    // Evento de 1h por defecto si tiene hora; todo el día si no
+    const end   = ev.time
+      ? (() => {
+          const [h, m] = ev.time.split(':').map(Number);
+          const endH   = String(h + 1).padStart(2, '0');
+          return toGCalDate(ev.date, `${endH}:${m.toString().padStart(2,'0')}`);
+        })()
+      : toGCalDate(ev.date, null);
+
+    const dates   = ev.time ? `${start}/${end}` : `${start}/${start}`;
+    const details = ev.reminders.length
+      ? `Aviso: ${ev.reminders.map(r => r >= 60 ? `${r/60}h` : `${r}min`).join(', ')} antes`
+      : '';
+
+    const params = new URLSearchParams({
+      action: 'TEMPLATE',
+      text:   ev.title,
+      dates,
+    });
+    if (details)    params.set('details', details);
+    if (ev.repeat === 'Todos los días') params.set('recur', 'RRULE:FREQ=DAILY');
+
+    return `https://calendar.google.com/calendar/render?${params.toString()}`;
+  };
+
+  /* Abrir Google Calendar en nueva pestaña */
+  const open = ev => {
+    window.open(buildUrl(ev), '_blank', 'noopener');
+  };
+
+  return { buildUrl, open };
+})();
+
+/* ============================================================
+   PUSH — Web Push Notifications via backend
+   · Se suscribe al servicio push del navegador
+   · Registra la suscripción en el backend
+   · Programa y cancela alarmas remotamente
+   ============================================================ */
+const Push = (() => {
+  // URL del backend en Render.com — cambiar por la URL real tras el deploy
+  const BACKEND = (typeof PUSH_BACKEND !== 'undefined' && PUSH_BACKEND)
+    || localStorage.getItem('ag-backend')
+    || '';
+
+  // userId único por dispositivo (persistido en localStorage)
+  const userId = (() => {
+    let id = localStorage.getItem('ag-userid');
+    if (!id) { id = 'u_' + Date.now() + '_' + Math.random().toString(36).slice(2,8); localStorage.setItem('ag-userid', id); }
+    return id;
+  })();
+
+  let _sub     = null;   // PushSubscription activa
+  let _enabled = false;
+
+  /* ── Convertir VAPID key de base64url a Uint8Array ── */
+  const urlB64ToUint8 = b64 => {
+    const pad = b64.length % 4 ? b64 + '='.repeat(4 - b64.length % 4) : b64;
+    const raw = atob(pad.replace(/-/g,'+').replace(/_/g,'/'));
+    return Uint8Array.from([...raw].map(c=>c.charCodeAt(0)));
+  };
+
+  /* ── Inicializar: obtener VAPID key y suscribirse ── */
+  const init = async () => {
+    if (!BACKEND) { console.log('[Push] Backend no configurado — modo local'); return; }
+    if (!('serviceWorker' in navigator) || !('PushManager' in window)) {
+      console.log('[Push] Push API no disponible en este navegador'); return;
+    }
+    try {
+      // Obtener clave pública VAPID del backend
+      const res  = await fetch(`${BACKEND}/vapid-public`);
+      const { key } = await res.json();
+
+      // Registrar suscripción push
+      const reg = await navigator.serviceWorker.ready;
+      _sub = await reg.pushManager.subscribe({
+        userVisibleOnly: true,
+        applicationServerKey: urlB64ToUint8(key),
+      });
+
+      // Enviar suscripción al backend
+      await fetch(`${BACKEND}/subscribe`, {
+        method:  'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body:    JSON.stringify({ subscription: _sub.toJSON(), userId }),
+      });
+
+      _enabled = true;
+      console.log('[Push] ✅ Suscrito al servicio push');
+    } catch(e) {
+      console.warn('[Push] No se pudo inicializar:', e.message);
+    }
+  };
+
+  /* ── Programar alarma en el backend ── */
+  const schedule = async (ev, minsBefore) => {
+    if (!_enabled || !BACKEND) return false;
+    try {
+      const evDate = new Date(`${ev.date}T${ev.time}:00`);
+      const fireAt = new Date(evDate.getTime() - minsBefore * 60000);
+      if (fireAt <= new Date()) return false;
+
+      const alarmId = `${ev.id}-${minsBefore}`;
+      const body    = minsBefore === 0   ? '¡Es ahora!'
+                    : minsBefore < 60    ? `En ${minsBefore} minutos`
+                    : `En ${minsBefore/60} hora${minsBefore>60?'s':''}`;
+
+      await fetch(`${BACKEND}/alarm`, {
+        method:  'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body:    JSON.stringify({ userId, alarmId, fireAt: fireAt.toISOString(), title: ev.title, body }),
+      });
+      console.log(`[Push] Alarma remota programada: ${ev.title} (${minsBefore}min antes)`);
+      return true;
+    } catch(e) {
+      console.warn('[Push] Error programando alarma:', e.message);
+      return false;
+    }
+  };
+
+  /* ── Programar todas las alarmas de un evento ── */
+  const scheduleAll = async ev => {
+    if (!ev.time || !ev.reminders?.length) return;
+    for (const mins of ev.reminders) await schedule(ev, mins);
+    // Alarma en el momento exacto
+    await schedule(ev, 0);
+  };
+
+  /* ── Cancelar alarmas de un evento ── */
+  const cancel = async evId => {
+    if (!_enabled || !BACKEND) return;
+    try {
+      // Cancelar cada reminder
+      const ev = (await DB.getAll()).find(e => e.id === evId);
+      if (ev?.reminders) {
+        for (const mins of [...(ev.reminders || []), 0]) {
+          await fetch(`${BACKEND}/alarm/${evId}-${mins}`, { method: 'DELETE' }).catch(()=>{});
+        }
+      }
+    } catch(e) { console.warn('[Push] Error cancelando alarmas:', e.message); }
+  };
+
+  /* ── Enviar notificación de prueba ── */
+  const test = async () => {
+    if (!_enabled || !BACKEND) {
+      UI.toast('Backend no configurado','err'); return;
+    }
+    try {
+      await fetch(`${BACKEND}/test`, {
+        method:  'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body:    JSON.stringify({ userId }),
+      });
+      UI.toast('Notificación de prueba enviada','ok');
+    } catch(e) { UI.toast('Error: ' + e.message, 'err'); }
+  };
+
+  /* ── Configurar URL del backend (desde ajustes) ── */
+  const setBackend = url => {
+    localStorage.setItem('ag-backend', url.trim().replace(/\/$/, ''));
+    window.location.reload();
+  };
+
+  const isEnabled  = () => _enabled;
+  const getBackend = () => BACKEND;
+
+  return { init, scheduleAll, cancel, test, setBackend, isEnabled, getBackend, userId };
+})();
+
 /* ============================================================
    APP — orquestador push-to-talk
    ============================================================ */
@@ -1111,7 +1307,8 @@ const App = (() => {
     Voice.cancel(); SR?.abort();
     if (!targetEv) { setMode('idle'); return; }
     try {
-      Notif.cancel(targetEv.id);   // cancelar timers de alarma
+      Notif.cancel(targetEv.id);
+      Push.cancel(targetEv.id);    // cancelar alarmas remotas
       await DB.del(targetEv.id);
       UI.toast(`${targetEv.title} eliminado`, 'ok');
       Voice.speak(`${targetEv.title} eliminado.`);
@@ -1132,7 +1329,8 @@ const App = (() => {
       if (pendingChanges.date || pendingChanges.time) updated.status = 'scheduled';
       Notif.cancel(targetEv.id);   // cancelar alarmas anteriores
       await DB.update(updated);
-      Notif.sch(updated);          // reprogramar con nueva fecha/hora
+      Notif.sch(updated);
+      Push.scheduleAll(updated);   // reprogramar alarmas remotas
       const partes = [];
       if (pendingChanges.date) partes.push(NLP.humanDate(pendingChanges.date));
       if (pendingChanges.time) partes.push(pendingChanges.time);
@@ -1147,15 +1345,17 @@ const App = (() => {
   };
 
   /* ── Guardar ── */
-  const saveEvent = async () => {
+  const saveEvent = async (openGcal = false) => {
     Voice.cancel(); SR?.abort();
     if (!pending) { setMode('idle'); return; }
     try {
       await DB.add(pending);
       Notif.sch(pending);
+      Push.scheduleAll(pending);
       UI.toast(`✓ ${pending.title} guardado`,'ok');
       Upcoming.render();
       Voice.speak(`Guardado. ${pending.title}.`);
+      if (openGcal) GCal.open(pending);
       pending = null;
       setMode('idle');
     } catch(e) { console.error(e); UI.toast('Error al guardar','err'); setMode('idle'); }
@@ -1188,8 +1388,9 @@ const App = (() => {
     Panel.init();
     VoiceSettings.init();
     Upcoming.render();
-    await Notif.reload();   // recargar alarmas pendientes al abrir la app
+    await Notif.reload();   // recargar alarmas locales
     Notif.req();
+    await Push.init();    // suscribir al servicio push remoto
 
     const btn = document.getElementById('micBtn');
 
@@ -1216,9 +1417,14 @@ const App = (() => {
     document.getElementById('btnYes').addEventListener('click', () => {
       if      (phase === 'delete') deleteEvent();
       else if (phase === 'update') updateEvent();
-      else                         saveEvent();
+      else                         saveEvent(false);
     });
-    document.getElementById('btnNo').addEventListener('click',  cancelEvent);
+    document.getElementById('btnNo').addEventListener('click', cancelEvent);
+
+    // Botón "Guardar + abrir Google Calendar"
+    document.getElementById('btnGcal').addEventListener('click', () => {
+      if (phase === 'event') saveEvent(true);
+    });
 
     // Input texto
     document.getElementById('btnSend').addEventListener('click', submitText);

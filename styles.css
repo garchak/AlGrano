@@ -558,6 +558,33 @@ body {
   border: 1px solid rgba(52,152,219,.25);
 }
 
+
+/* ── Botón Google Calendar ──────────────── */
+.btn-gcal {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  width: 100%;
+  margin-top: 8px;
+  padding: 9px 16px;
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: 11px;
+  letter-spacing: .08em;
+  cursor: pointer;
+  transition: all .25s;
+}
+.btn-gcal:hover {
+  border-color: #4285f4;
+  color: #4285f4;
+  background: rgba(66,133,244,.07);
+}
+.btn-gcal svg { flex-shrink: 0; }
+
 /* ── MISC ───────────────────────────────── */
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation-duration: .01ms !important; }
@@ -655,3 +682,81 @@ body {
   background: var(--amber);
   cursor: pointer;
 }
+
+/* ════════════════════════════════════════════
+   BANNER DE ALARMA IN-APP
+   Aparece cuando la app está abierta en pantalla
+════════════════════════════════════════════ */
+.alarm-banner {
+  position: fixed;
+  top: max(16px, env(safe-area-inset-top));
+  left: 50%;
+  transform: translateX(-50%) translateY(-120%);
+  width: calc(100% - 32px);
+  max-width: 360px;
+  background: var(--card);
+  border: 1px solid var(--amber);
+  border-radius: 14px;
+  padding: 14px 16px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  z-index: 200;
+  box-shadow:
+    0 0 0 1px rgba(232,168,48,.15),
+    0 8px 32px rgba(0,0,0,.5),
+    0 0 60px rgba(232,168,48,.08);
+  transition: transform .4s var(--spring);
+  pointer-events: none;
+}
+.alarm-banner.visible {
+  transform: translateX(-50%) translateY(0);
+  pointer-events: all;
+}
+
+.ab-icon {
+  font-size: 26px;
+  flex-shrink: 0;
+  animation: alarm-pulse 0.6s ease-in-out infinite alternate;
+}
+@keyframes alarm-pulse {
+  from { transform: scale(1);    opacity: 1;   }
+  to   { transform: scale(1.15); opacity: 0.7; }
+}
+
+.ab-text {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.ab-text strong {
+  font-family: var(--serif);
+  font-size: 16px;
+  font-weight: 400;
+  color: var(--text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.ab-text span {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--amber-dim);
+  letter-spacing: .06em;
+}
+
+.ab-close {
+  background: none;
+  border: 1px solid var(--faint);
+  border-radius: 50%;
+  width: 28px; height: 28px;
+  color: var(--muted);
+  cursor: pointer;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 12px;
+  flex-shrink: 0;
+  transition: all .2s;
+}
+.ab-close:hover { border-color: var(--danger); color: var(--danger); }
