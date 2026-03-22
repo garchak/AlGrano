@@ -242,34 +242,32 @@ const Voice = (() => {
 
 /* ============================================================
    RECONOCIMIENTO DE VOZ — Push-to-talk
-   Patrón probado: continuous+interimResults, acumular en onresult,
-   procesar en onend (que se dispara siempre tras stop())
+   SOLUCIÓN CLAVE: getUserMedia() primero para obtener permiso
+   explícito, luego SpeechRecognition. Sin esto, todos los
+   navegadores devuelven not-allowed (Chrome, Safari, Brave).
    ============================================================ */
 const SR = (() => {
   const Cls = window.SpeechRecognition || window.webkitSpeechRecognition;
   if (!Cls) { console.warn('[SR] API no disponible'); return null; }
 
   let rec        = null;
-  let transcript = '';   // texto acumulado durante la grabación
+  let transcript = '';
   let active     = false;
   let stopping   = false;
   let cbFinal    = null;
   let cbErr      = null;
 
-  const start = (onFinal, onErr) => {
-    // Limpiar instancia anterior
-    if (rec) { try { rec.abort(); } catch(_){} rec = null; }
-    cbFinal    = onFinal;
-    cbErr      = onErr;
-    transcript = '';
-    active     = false;
-    stopping   = false;
+  /* ── Crear e iniciar la instancia de reconocimiento ── */
+  const _startRec = () => {
+    if (rec) { try { rec.abort(); } catch(_){} }
 
     rec = new Cls();
-    rec.lang           = 'es-ES';
-    rec.continuous     = true;   // no para solo por silencio
-    rec.interimResults = true;   // resultados en tiempo real para mostrar texto
+    rec.lang            = 'es-ES';
+    rec.continuous      = true;
+    rec.interimResults  = true;
     rec.maxAlternatives = 1;
+    transcript = '';
+    stopping   = false;
 
     rec.onstart = () => {
       active = true;
@@ -277,11 +275,9 @@ const SR = (() => {
     };
 
     rec.onresult = e => {
-      // Acumular TODO el texto recibido hasta ahora
       let t = '';
       for (let i = 0; i < e.results.length; i++) t += e.results[i][0].transcript;
       transcript = t.trim();
-      // Mostrar en pantalla en tiempo real
       const el = document.getElementById('transcriptText');
       if (el) el.textContent = transcript;
     };
@@ -290,46 +286,66 @@ const SR = (() => {
       console.log('[SR] onend — stopping:', stopping, '— transcript:', transcript);
       active = false;
       if (stopping) {
-        // Stop voluntario: procesar lo grabado
         if (transcript) cbFinal?.(transcript);
         else            cbErr?.('no-speech');
       }
-      // abort() voluntario → stopping=false → no hacer nada
     };
 
     rec.onerror = e => {
-      console.warn('[SR] error:', e.error);
+      console.warn('[SR] onerror:', e.error);
       active = false;
       if (e.error === 'aborted') return;
       cbErr?.(e.error);
     };
 
-    // 50ms de delay — Chrome necesita un tick tras el evento táctil/click
-    setTimeout(() => {
-      if (!rec) return;
-      try {
-        rec.start();
-        console.log('[SR] start() llamado');
-      } catch(e) {
-        console.error('[SR] start() excepción:', e.name, e.message);
-        cbErr?.(e.name === 'InvalidStateError' ? 'busy' : 'start-error');
-      }
-    }, 50);
+    try {
+      rec.start();
+      console.log('[SR] start() ok');
+    } catch(e) {
+      console.error('[SR] start() excepción:', e.name, e.message);
+      cbErr?.(e.name);
+    }
   };
 
-  // Usuario suelta el botón → parar y procesar
+  /* ── start(): pedir permiso de micrófono primero ── */
+  const start = (onFinal, onErr) => {
+    cbFinal = onFinal;
+    cbErr   = onErr;
+    active  = false;
+
+    // PASO 1: pedir permiso explícito con getUserMedia
+    // Esto es lo que dispara el popup de permiso en todos los navegadores
+    navigator.mediaDevices.getUserMedia({ audio: true })
+      .then(stream => {
+        // Permiso concedido — cerrar el stream inmediatamente
+        // (solo lo necesitábamos para el permiso)
+        stream.getTracks().forEach(t => t.stop());
+        console.log('[SR] permiso concedido, iniciando reconocimiento…');
+        // PASO 2: ahora sí iniciar SpeechRecognition
+        _startRec();
+      })
+      .catch(err => {
+        console.error('[SR] getUserMedia rechazado:', err.name, err.message);
+        if (err.name === 'NotAllowedError' || err.name === 'PermissionDeniedError') {
+          cbErr?.('not-allowed');
+        } else if (err.name === 'NotFoundError') {
+          cbErr?.('no-mic');
+        } else {
+          cbErr?.(err.name);
+        }
+      });
+  };
+
   const stop = () => {
     console.log('[SR] stop() — active:', active);
     if (active) {
       stopping = true;
       try { rec.stop(); } catch(e) { console.warn('[SR] stop() err:', e); }
     } else {
-      // Soltó antes de que empezara (muy rápido)
       cbErr?.('no-speech');
     }
   };
 
-  // Cancelar sin procesar
   const abort = () => {
     stopping = false;
     if (rec) { try { rec.abort(); } catch(_){} rec = null; }
